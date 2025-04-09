@@ -7,7 +7,11 @@ chips: struct {
     atsamd51j19: *const microzig.Target,
 },
 
-boards: struct {},
+boards: struct {
+    arduino: struct {
+        uno_m4: *const microzig.Target,
+    },
+},
 
 pub fn init(dep: *std.Build.Dependency) Self {
     const b = dep.builder;
@@ -41,7 +45,17 @@ pub fn init(dep: *std.Build.Dependency) Self {
         .chips = .{
             .atsamd51j19 = chip_atsamd51j19.derive(.{}),
         },
-        .boards = .{},
+        .boards = .{
+            .arduino = .{
+                .uno_m4 = chip_atsamd51j19.derive(.{
+                    .board = .{
+                        .name = "Arduino Uno M4",
+                        .url = "https://store.arduino.cc/arduino-uno-m4",
+                        .root_source_file = b.path("src/boards/arduino_uno_m4.zig"),
+                    },
+                }),
+            },
+        },
     };
 }
 
