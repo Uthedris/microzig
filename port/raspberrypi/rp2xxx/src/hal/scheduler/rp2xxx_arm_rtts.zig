@@ -76,41 +76,14 @@ pub fn configure(comptime RTTS: type) type {
             //      |  xPSR  | +  15
             //      +--------+
 
-            var sp = in_stack;
+            var sp = in_stack - 16;
 
-            _ = @TypeOf(in_pc);
-            _ = @TypeOf(sp);
+            for (sp[0..14]) |*reg| {
+                reg.* = 0xface_fade; // so we can spot bad values
+            }
 
-            asm volatile (
-                \\    mov    r1,    %[sp]
-                \\
-                \\    subs   r1,    #16              @ Reserve 16 bytes on stack
-                \\    movs   r2,    #0               @ r12
-                \\    movs   r3,    #0               @ lr
-                \\    mov    r4,    %[pc]            @ pc
-                \\    movs   r5,    #0x01            @ xPSR  <--- 0x0100_0000
-                \\    rev    r5,    r5
-                \\    stm    r1!,   {r2-r5}
-                \\    subs   r1,    #16
-                \\
-                \\    subs   r1,    #16              @ Reserve 16 bytes on stack
-                \\    movs   r4,    #0               @ r0, r1, r2, r3
-                \\    movs   r5,    #0
-                \\    stm    r1!,   {r2-r5}
-                \\    subs   r1,    #16
-                \\
-                \\    subs   r1,    #16              @ Reserve 16 bytes on stack
-                \\    stm    r1!,   {r2-r5}          @ r4, r5, r6, r7
-                \\    subs   r1,    #16
-                \\
-                \\    subs   r1,    #16              @ Reserve 16 bytes on stack
-                \\    stm    r1!,   {r2-r5}          @ r8, r9, r10, r11
-                \\    subs   r1,    #16
-                \\    mov    %[sp], r1
-                : [sp] "+r" (sp),
-                : [pc] "r" (in_pc),
-                : "r1", "r2", "r3", "r4", "r5"
-            );
+            sp[14] = @intFromPtr(in_pc);
+            sp[15] = 0x0100_0000;
 
             return sp;
         }
@@ -571,7 +544,7 @@ pub fn configure(comptime RTTS: type) type {
         // Null Task
         //==============================================================================
 
-        const null_task_stack_len = 24;
+        const null_task_stack_len = 16;
 
         var null_task_stack: [null_task_stack_len]usize = undefined;
         pub var null_task_stack_pointer: usize = undefined;
@@ -582,11 +555,6 @@ pub fn configure(comptime RTTS: type) type {
         // replacement code as the lowest priority task.
 
         fn null_task_loop() callconv(.naked) noreturn {
-            // while (true)
-            // {
-            //   // hal.scb.scr |= hal.scb.SCR_SEVONPEND;
-            //   asm volatile ( "wfe" );
-            // }
             asm volatile (
                 \\ null_loop:
                 \\       wfe
