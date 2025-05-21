@@ -1,33 +1,28 @@
-const std = @import("std");
-const microzig = @import("microzig");
+const std        = @import( "std" );
+const microzig   = @import( "microzig" );
 
-const rtts = @import("rtts/rtts.zig");
+const hal       = microzig.hal;
+const drivers   = microzig.drivers;
+const rtts      = microzig.rtts;
 
-const hal = microzig.hal;
+const time      = hal.time;
+const uart      = hal.uart;
 
-const time = hal.time;
-const gpio = hal.gpio;
-const uart = hal.uart;
-const usb = hal.usb;
-const watchdog = hal.watchdog;
-const i2c = hal.i2c;
+const uart0     = uart.instance.num(0);
 
-const uart0 = uart.instance.num(0);
+const sched_config = rtts.Config
+{
+  .use_cores         = 0xFF,
+  .event_flags_count = 8,
+};
 
-const Pin = gpio.Pin;
-const usb_dev = usb.Usb(.{});
+const tasks = [_]rtts.Task{
+  .{ .name = "alpha", .func = taskA, .stack_size = 256, .event_mask = 0x01 },
+  .{ .name = "bravo", .func = taskB, .stack_size = 512, },
+  .{ .name = "charlie", .func = taskC, .stack_size = 256, },
+};
 
-const scheduler = rtts.scheduler(
-    .{
-        .use_cores = 0xFF,
-        .event_flags_count = 8,
-    },
-    &.{
-        rtts.Task.init("alpha", loopA, 256, 0x01),
-        rtts.Task.init("beta", loopB, 512, 0),
-        rtts.Task.init("gamma", loopC, 256, 0),
-    },
-);
+const scheduler  = rtts.scheduler(sched_config, &tasks);
 
 // -----------------------------------------------------------------------------
 //  Local Types
@@ -35,7 +30,7 @@ const scheduler = rtts.scheduler(
 
 //const allocator = microzig.allocator;
 
-const Allocator = microzig.core.Allocator;
+const Allocator = microzig.Allocator;
 
 var heap_allocator: Allocator = undefined;
 
@@ -45,109 +40,94 @@ var heap_allocator: Allocator = undefined;
 
 // --- GPIO pins --------------------------------
 
-const pin_config = hal.pins.GlobalConfiguration{
-    .GPIO0 = .{ .name = "uart0_tx", .function = .UART0_TX },
-    .GPIO1 = .{
-        .name = "uart0_rx",
-        .function = .UART0_RX,
+const pin_config = hal.pins.GlobalConfiguration
+{
+  .GPIO0 =
+    .{
+      .name      = "uart0_tx",
+      .function  = .UART0_TX
     },
-    .GPIO2 = .{
-        .name = "led_a",
-        .function = .SIO,
-        .direction = .out,
-    },
-    .GPIO3 = .{
-        .name = "led_b",
-        .function = .SIO,
-        .direction = .out,
-    },
-};
+  };
 
 // ---- UART Configuration --------------------------------
 
 const baud_rate = 115200;
 
-// ---- I2C1 Configuration --------------------------------
-
-const i2c1 = i2c.instance(.I2C1);
-const i2c_addr: i2c.Address = @enumFromInt(0x42);
-
 // ---- MicroZig Options --------------------------------
 
-pub const microzig_options = microzig.Options{
-    .log_level = .debug,
-    .logFn = hal.uart.logFnThreadsafe,
-    // .interrupts = .{ .SVCall          = .{ .c = RTTS.Platform.svc_ISR },
-    //                  .PendSV          = .{ .c = RTTS.Platform.pendsv_ISR },
-    //                  .SIO_IRQ_FIFO    = .{ .c = RTTS.Platform.fifo_ISR },
-    //                  .SIO_IRQ_FIFO_NS = .{ .c = RTTS.Platform.fifo_ISR } },
+pub const microzig_options = microzig.Options
+  {
+    .log_level  = .debug,
+    .logFn      = hal.uart.logFnThreadsafe,
+    // .interrupts = .{ .SVCall          = .{ .c = RTTS.hal.rtts.svc_ISR },
+    //                  .PendSV          = .{ .c = RTTS.hal.rtts.pendsv_ISR },
+    //                  .SIO_IRQ_FIFO    = .{ .c = RTTS.hal.rtts.fifo_ISR },
+    //                  .SIO_IRQ_FIFO_NS = .{ .c = RTTS.hal.rtts.fifo_ISR } },
     .cpu = .{ .ram_vectors = true },
-};
+  };
 
 // -----------------------------------------------------------------------------
 //  Function: main
 // -----------------------------------------------------------------------------
 
-pub fn main() !void {
-    heap_allocator = Allocator.init_with_heap(0);
+pub fn main() !void
+{
+    heap_allocator = Allocator.init_with_heap( 0 );
     const allocator = heap_allocator.allocator();
 
     _ = @TypeOf(allocator);
 
-    // --- Set up GPIO -------------------------------
+  // --- Set up GPIO -------------------------------
 
-    pin_config.apply();
+  pin_config.apply();
 
-    // --- Set up UART -------------------------------
+  // --- Set up UART -------------------------------
 
-    uart0.apply(.{
-        .baud_rate = baud_rate,
-        .clock_config = hal.clock_config,
-    });
+  uart0.apply(
+   .{
+      .baud_rate    = baud_rate,
+      .clock_config = hal.clock_config,
+    } );
 
-    // --- Set up Logger -----------------------------
+  // --- Set up Logger -----------------------------
 
-    hal.uart.init_logger(uart0);
+  hal.uart.init_logger( uart0 );
 
-    std.log.info("Hello, World!", .{});
+  std.log.info("Hello, World!", .{});
 
-    // --- Set up I2C communication --------------------
+  // --- Run RTTS tasks ------------------------------
 
-    // Note: at the time of writing, the microzig SDK does not support I2C slave mode.
-    //       This is why we configure the I2C register manually.
-
-    // i2c1.configure(.{
-    //   .mode = .slave,
-    //   .address = i2c_addr,
-    //   .sda = .{ .pin = 26 },
-    //   .scl = .{ .pin = 27 },
-    // });
-
-    // Set up I2C ISR
-
-    //i2c1.set_isr( .{ .callback = i2cCallback, .param = null } );
-
-    // --- Run RTTS tasks ------------------------------
-
-    try scheduler.run();
+  try scheduler.run(&tasks);
 }
 
-fn loopA(Sched: type) void {
-    std.log.debug("{s}TaskA -- Top of loop -- waiting for event", .{Sched.Platform.debug_core()});
-    Sched.wait_for_event(0x01, true);
+fn taskA() noreturn
+{
+  while (true)
+  {
+    std.log.debug( "{s}TaskA -- Top of loop -- waiting for event", .{scheduler.platform.debug_core()} );
+    scheduler.wait_for_event( 0x01, true );
+  }
 }
 
-fn loopB(Sched: type) void {
-    std.log.debug("{s}TaskB -- Signaling task alpha", .{Sched.Platform.debug_core()});
-    Sched.signal_event(0x01, Sched.taskNamed("alpha"));
+fn taskB() noreturn
+{
+  while (true)
+  {
+    std.log.debug( "{s}TaskB -- Signaling task alpha", .{scheduler.platform.debug_core()} );
+    scheduler.signal_event( .alpha, 0x01 );
 
-    std.log.debug("{s}TaskB -- Yielding", .{Sched.Platform.debug_core()});
-    Sched.yield();
+    std.log.debug( "{s}TaskB -- Yielding", .{scheduler.platform.debug_core()} );
+    scheduler.yield();
+  }
 }
 
-fn loopC(Sched: type) void {
-    std.log.debug("{s}TaskC -- Sleeping", .{Sched.Platform.debug_core()});
-    time.sleep_ms(1000);
-    std.log.debug("{s}TaskC -- Posting significant event", .{Sched.Platform.debug_core()});
-    Sched.significant_event();
+fn taskC() noreturn
+{
+  while (true)
+  {
+    std.log.debug( "{s}TaskC -- Sleeping", .{scheduler.platform.debug_core()} );
+    time.sleep_ms( 1000 );
+    std.log.debug( "{s}TaskC -- Posting significant event", .{scheduler.platform.debug_core()} );
+    scheduler.significant_event();
+  }
 }
