@@ -32,6 +32,14 @@ pub const drivers = @import("hal/drivers.zig");
 pub const compatibility = @import("hal/compatibility.zig");
 pub const image_def = @import("hal/image_def.zig");
 
+pub const rtts = switch (compatibility.chip) {
+    .RP2040 => @import("hal/scheduler/rp2xxx_arm_rtts.zig"),
+    .RP2350 => switch (compatibility.arch) {
+        .arm => @import("hal/scheduler/rp2xxx_arm_rtts.zig"),
+        .riscv => @import("hal/scheduler/rp2350_riscv_rtts.zig"),
+    },
+};
+
 comptime {
     // HACK: tests can't access microzig. maybe there's a better way to do this.
     if (!builtin.is_test and compatibility.chip == .RP2350) {
