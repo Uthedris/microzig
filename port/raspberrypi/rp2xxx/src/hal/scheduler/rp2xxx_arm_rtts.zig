@@ -29,7 +29,12 @@ const FIFOCommand = enum(u8) {
     _,
 };
 
-pub fn configure(comptime RTTS: type) type {
+// ### TODO ###  Support running tasks in unprivileged mode
+// ### TODO ###  Improve SVC calling to avoid extra pendSV
+
+pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
+    _ = config;
+
     return struct {
         const Platform = @This();
 
@@ -100,15 +105,15 @@ pub fn configure(comptime RTTS: type) type {
                 PPB.SHPR3.modify(.{ .PRI_14_3 = 0, .PRI_15_3 = 0 });
             }
 
-            _ = cpu.interrupt.exception.set_handler(.SVCall, .{ .c = svc_ISR });
+            _ = cpu.interrupt.exception.set_handler(.SVCall, .{ .naked = svc_ISR });
             _ = cpu.interrupt.exception.set_handler(.PendSV, .{ .naked = pendsv_ISR });
 
             if (RTTS.core_mask & 0x02 != 0) {
                 if (compatibility.chip == .RP2040) {
-                    _ = hal.irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
-                    _ = hal.irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
                 } else {
-                    _ = hal.irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
                 }
                 // Note: We don't enable these interrupts until after the other core is
                 // launched, so we don't mess with the launch sequence.
@@ -119,7 +124,7 @@ pub fn configure(comptime RTTS: type) type {
             null_task_stack[null_task_stack_len - 2] = @intFromPtr(&null_task_loop);
             null_task_stack[null_task_stack_len - 1] = 0x01000000;
 
-            null_task_stack_pointer = @intFromPtr(&null_task_stack[null_task_stack_len - 16]);
+            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 16]);
 
             // Launch the other core
 
@@ -142,59 +147,21 @@ pub fn configure(comptime RTTS: type) type {
         /// Send the yield SVC
         ///
         pub fn yield() void {
-            // If we're in thread mode use a SVC to post yield event, otherwise
-            // set the pendSV flag to do the task swap
-
-            if (scb.ICSR.read().VECTACTIVE == 0) {
-                asm volatile ("svc #0");
-            } else {
-                scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                asm volatile ("isb");
-            }
+            asm volatile ("svc #0");
         }
 
         //------------------------------------------------------------------------------
-        /// Post a significant event
+        /// Send the significant event SVC
         ///
         pub fn significant_event() void {
-            // If we're in thread mode use a SVC to post the significant event, otherwise
-            // set the pendSV flag
-
-            if (scb.ICSR.read().VECTACTIVE == 0) {
-                asm volatile ("svc #1");
-            } else {
-                for (&RTTS.sig_event) |*sig_event| {
-                    sig_event.* = true;
-                }
-
-                scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                asm volatile ("isb");
-
-                send_fifo_command(.dispatch, null, null);
-            }
+            asm volatile ("svc #1");
         }
 
         //------------------------------------------------------------------------------
         /// Send the wait SVC
         ///
         pub fn wait() void {
-            // If we're in thread mode use a SVC to post yield event, otherwise
-            // set we check the current task's event flags under the mask
-            // and yield if none are set;
-
-            if (scb.ICSR.read().VECTACTIVE == 0) {
-                asm volatile ("svc #2");
-            } else {
-                if (RTTS.current_task[core_id()]) |task| {
-                    // We need to wait if we have a mask and no
-                    // mask bit has a corresponding event flag set.
-                    if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                        task.state = .waiting;
-                        scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                        asm volatile ("isb");
-                    }
-                }
-            }
+            asm volatile ("svc #2");
         }
 
         //==============================================================================
@@ -205,12 +172,28 @@ pub fn configure(comptime RTTS: type) type {
         //  2. pendsv_ISR  - (PendSV) The pendsv interrupt service routine
         //  3. fifo_ISR    - (The inter-core communication interrupt service routine
         //
+        //  For time functions?
         //  4. sysTick_ISR - (SysTick) The sysTick interrupt service routine
 
         //------------------------------------------------------------------------------
-        /// svc interrupt service routine
+        /// SVC interrupt service routine
         ///
-        fn svc_ISR() callconv(.c) void {
+        /// This ISR is registered as a naked function, so we can save the registers
+        /// and restore the registers in a predicable way.
+        ///
+        pub fn svc_ISR() callconv(.naked) noreturn {
+            // Upon entry the caller's stack looks like this:
+            //      +--------+
+            //      |  r0    | <- Stack pointer
+            //      |  r1    | +  1
+            //      |  r2    | +  2
+            //      |  r3    | +  3
+            //      |  r12   | +  4
+            //      |  lr    | +  5
+            //      |  pc    | +  6
+            //      |  xPSR  | +  7
+            //      +--------+
+            //
             //    We need to get a pointer to the callers stack so we can figure out
             //    the trap code How we do it depends on whether the SVC was called
             //    from code using a process stack (a task) or the main stack (an
@@ -230,50 +213,135 @@ pub fn configure(comptime RTTS: type) type {
             //    register will be -7 or -15 and the current stack pointer will be
             //    the same as the caller.
             //
-
-            // After a SVC call the caller's stack looks like this:
-            //      +--------+
-            //      |  r0    | <- Stack pointer
-            //      |  r1    | +  1
-            //      |  r2    | +  2
-            //      |  r3    | +  3
-            //      |  r12   | +  4
-            //      |  lr    | +  5
-            //      |  pc    | +  6
-            //      |  xPSR  | +  7
-            //      +--------+
-
-            var lr: i32 = undefined;
-            var sp: [*]u32 = undefined;
+            //  When Calling do_SVC the caller's stack looks like this:
+            //
+            //       +--------+
+            //       |  r8    | <- Stack pointer (thread mode)
+            //       |  r9    | +  4
+            //       |  r10   | +  8
+            //       |  r11   | + 12
+            //       |  r4    | + 16
+            //       |  r5    | + 20
+            //       |  r6    | + 24
+            //       |  r7    | + 28
+            //       |  r0    | + 32      <-- Stack pointer (handler mode)
+            //       |  r1    | + 36      + 4
+            //       |  r2    | + 40      + 8
+            //       |  r3    | + 44      + 12
+            //       |  r12   | + 48      + 16
+            //       |  lr    | + 52      + 20
+            //       |  pc    | + 56      + 24
+            //       |  xPSR  | + 60      + 28
+            //       +--------+
 
             asm volatile (
-                \\    mov   %[lr], lr
-                \\    mov   %[sp], sp
-                : [lr] "+r" (lr),
-                  [sp] "+r" (sp),
+                \\    movs  r0,   #0xff
+                \\    mov   r1,   lr
+                \\    ands  r0,   r1
+                \\    cmp   r0,   #0xf1
+                \\    beq   handler_mode
+                \\
+                \\    mrs   r0,    psp
+                \\    subs  r0,    #16
+                \\    stm   r0!,   {r4, r5, r6, r7}
+                \\    mov   r4,    r8
+                \\    mov   r5,    r9
+                \\    mov   r6,    r10
+                \\    mov   r7,    r11
+                \\    subs  r0,    #16
+                \\
+                \\    subs  r0,    #16
+                \\    stm   r0!,   {r4, r5, r6, r7}
+                \\    subs  r0,    #16
+                \\
+                \\    mov   r5,   lr
+                \\                                      @ Pass the old task's stack pointer
+                \\    movs  r1,   #56
+                \\    ldr   r1,   [r1, r0]              @ set 2nd param to caller's pc
+                \\    movs  r2,   #0                    @ set 3rd param to false
+                \\    bl    %[do_SVC]                   @ to findNextTaskSP, which returns
+                \\    mov   lr,   r5                    @ the new task's stack pointer.
+                \\
+                \\    ldm   r0!,  {r4, r5, r6, r7}      @ Restore the registers we saved
+                \\    mov   r8,   r4
+                \\    mov   r9,   r5
+                \\    mov   r10,  r6
+                \\    mov   r11,  r7
+                \\    ldm   r0!,  {r4, r5, r6, r7}
+                \\    msr   psp,  r0
+                \\    bx    lr
+                \\
+                \\ handler_mode:
+                \\    mov   r5,   lr
+                \\    movs  r1,   #24
+                \\    ldr   r1,   [r0, r1]              @ set 2nd param to caller's pc
+                \\    movs  r3,   #1                    @ set 3rd param to true
+                \\    bl    %[do_SVC]                   @ to findNextTaskSP, which returns
+                \\    mov   lr,   r5                    @ the new task's stack pointer.
+                \\    bx    lr
+                :
+                : [do_SVC] "s" (&do_SVC),
             );
+        }
 
-            if (lr == -3) {
-                // get the process stack pointer
-                asm volatile (
-                    \\    mrs   %[sp], psp
-                    : [sp] "+r" (sp),
-                    :
-                    : "r0"
-                );
-            }
+        // If we were called from thread mode all the registers have been saved
+        // we can do the dispatch directly and return the new stack pointer.
 
-            const pc = sp[6];
+        fn do_SVC(in_sp: [*]usize, in_pc: usize, in_handler_mode: bool) callconv(.c) [*]usize {
 
-            const svc_id: SvcID = @enumFromInt(@as(*u16, @ptrFromInt(pc - 2)).* & 0xff);
+            const svc_id: SvcID = @enumFromInt(@as(*u16, @ptrFromInt(in_pc - 2)).* & 0xff);
 
-            std.log.debug("{s}SVC: {}", .{ debug_core(), @intFromEnum(svc_id) });
+            // std.log.debug("do_SVC: svc_id: {s} in_sp: 0x{x:08} in_pc: 0x{x:08} handler_mode: {s}", .{@tagName(svc_id), @intFromPtr(in_sp), in_pc, if (in_handler_mode) "true" else "false"});
+
+            // for (0..16) |i| {
+            //     std.log.debug("    sp +{d:3}  0x{x:08}", .{i * 4, in_sp[i]});
+            // }
 
             switch (svc_id) {
-                .yield => yield(),
-                .significant_event => significant_event(),
-                .wait => wait(),
+                .yield =>
+                {
+                    // ### TODO ### Should we do anything if we are in handler mode?
+                    if (in_handler_mode) {
+                        scb.ICSR.modify(.{ .PENDSVSET = 1 });
+                        asm volatile ("isb");
+                    } else {
+                        return RTTS.find_next_task_sp(in_sp);
+                    }
+                },
+                .significant_event =>
+                {
+                    for (&RTTS.sig_event) |*sig_event| {
+                        sig_event.* = true;
+                    }
+
+                    send_fifo_command(.dispatch, null, null);
+
+                    if (in_handler_mode) {
+                        scb.ICSR.modify(.{ .PENDSVSET = 1 });
+                        asm volatile ("isb");
+                    } else {
+                        return RTTS.find_next_task_sp(in_sp);
+                    }
+                },
+                .wait =>
+                {
+                    if (RTTS.current_task[core_id()]) |task| {
+                        // We need to wait if we have a mask and no
+                        // mask bit has a corresponding event flag set.
+                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
+                            task.state = .waiting;
+                            if (in_handler_mode) {
+                                scb.ICSR.modify(.{ .PENDSVSET = 1 });
+                                asm volatile ("isb");
+                            } else {
+                                return RTTS.find_next_task_sp(in_sp);
+                            }
+                        }
+                    }
+                },
             }
+
+            return in_sp;
         }
 
         //------------------------------------------------------------------------------
@@ -338,7 +406,7 @@ pub fn configure(comptime RTTS: type) type {
                 \\    subs  r0,    #16
                 \\
                 \\    mov   r5,   lr
-                \\    mov   r1,   r0                    @ Pass the old task's stack pointer
+                \\                                      @ Pass the old task's stack pointer from r0
                 \\    bl    %[find_next]                @ to findNextTaskSP, which returns
                 \\    mov   lr,   r5                    @ the new task's stack pointer.
                 \\
@@ -429,15 +497,15 @@ pub fn configure(comptime RTTS: type) type {
 
                 if (compatibility.chip == .RP2040) {
                     if (core_id() == 0) {
-                        hal.irq.enable(.SIO_IRQ_PROC0);
+                        irq.enable(.SIO_IRQ_PROC0);
                     } else {
-                        hal.irq.enable(.SIO_IRQ_PROC1);
+                        irq.enable(.SIO_IRQ_PROC1);
                     }
                 } else {
-                    hal.irq.enable(.SIO_IRQ_FIFO);
+                    irq.enable(.SIO_IRQ_FIFO);
                 }
 
-                cpu.interrupt.enable_interrupts();
+                irq.globally_enable();
             }
 
             // Switch to the highest priority task
@@ -481,13 +549,6 @@ pub fn configure(comptime RTTS: type) type {
             );
 
             unreachable;
-        }
-
-        //------------------------------------------------------------------------------
-        /// Core1 initialization
-        fn core1_init() noreturn {
-            std.log.debug("{s}Init", .{debug_core()});
-            run_first_task();
         }
 
         //==============================================================================
@@ -544,10 +605,11 @@ pub fn configure(comptime RTTS: type) type {
         // Null Task
         //==============================================================================
 
-        const null_task_stack_len = 16;
+        // ### TODO ###  Why can't this get by with just 16 words?
+        const null_task_stack_len = 24;
 
         var null_task_stack: [null_task_stack_len]usize = undefined;
-        pub var null_task_stack_pointer: usize = undefined;
+        pub var null_task_stack_pointer: [*]usize = undefined;
 
         // ------------------------------------------------------------------------
         // The null task just calls wait for interrupt in an infinite loop.
