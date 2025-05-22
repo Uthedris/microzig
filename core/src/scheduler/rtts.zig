@@ -17,6 +17,9 @@ pub const Config = struct {
 
     /// The number of event flags to use.
     event_flags_count: u8 = 8,
+
+    /// run tasks in unprivileged mode
+    run_unprivileged: bool = false,
 };
 
 /// A structure containing the task configuration data.
@@ -45,7 +48,9 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
     return struct {
         const Sched = @This();
 
-        pub const platform = hal.rtts.configure(Sched);
+        pub const Configuration = Config;
+
+        pub const platform = hal.rtts.configure(Sched, config);
 
         //============================================================================
         // Type Definitions
@@ -175,9 +180,9 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 std.log.debug("  event_mask: {x}", .{task_list[i].event_mask});
                 std.log.debug("  state: {s}", .{@tagName(task_list[i].state)});
 
-                for (0..16) |j| {
-                    std.log.debug("  sp + {d:2}: 0x{X:08}", .{ j, task_list[i].stack_pointer[j] });
-                }
+                // for (0..16) |j| {
+                //     std.log.debug("  sp + {d:2}: 0x{X:08}", .{ j, task_list[i].stack_pointer[j] });
+                // }
             }
 
             platform.start_cores();
@@ -370,7 +375,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
         //----------------------------------------------------------------------------
         /// Find the stack pointer for the next task to run on current core.
-        pub fn find_next_task_sp(in_sp: usize) usize {
+        pub fn find_next_task_sp(in_sp: [*]usize) [*]usize {
             std.log.debug("{s}  Finding next task", .{platform.debug_core()});
 
             var a_task: ?*TaskItem = null;
@@ -378,11 +383,11 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
 
-            // If current task is running, set it to runnable
+            // If current task is running, set it to runnable and save its stack pointer
 
             if (current_task[platform.core_id()]) |task| {
                 if (task.state == .running) task.state = .runnable;
-                task.stack_pointer = @ptrFromInt(in_sp);
+                task.stack_pointer = in_sp;
             }
 
             // Figure out where to start our scan
@@ -395,7 +400,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // With no significant event, start after the lowest priority task that is running.
                 a_task = task.next;
             } else {
-                std.log.debug("{s}  Null already running  sp: 0x{X:08}", .{ platform.debug_core(), platform.null_task_stack_pointer });
+                std.log.debug("{s}  Null already running  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(platform.null_task_stack_pointer) });
                 current_task[platform.core_id()] = null;
                 return platform.null_task_stack_pointer;
             }
@@ -404,17 +409,17 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
             while (a_task) |task| {
                 if (task.state == .runnable) {
-                    std.log.debug("{s}  Switch to task 0x{X:08}  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(task), @intFromPtr(task.stack_pointer) });
+                    std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
 
                     task.state = .running;
                     current_task[platform.core_id()] = task;
-                    return @intFromPtr(task.stack_pointer);
+                    return task.stack_pointer;
                 }
 
                 a_task = task.next;
             }
 
-            std.log.debug("{s}  Switch to null task  sp: 0x{X:08}", .{ platform.debug_core(), platform.null_task_stack_pointer });
+            std.log.debug("{s}  Switch to null task  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(platform.null_task_stack_pointer) });
 
             current_task[platform.core_id()] = null;
             return platform.null_task_stack_pointer;
@@ -427,6 +432,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             var retval: *TaskItem = &task_list[0];
 
             for (0..core_count) |i| {
+                if (core_mask & (@as(u8, 1) << @intCast(i)) == 0) continue;
+
                 if (current_task[i]) |a_task| {
                     if (priority_compare(a_task, retval) < 0) {
                         retval = a_task;

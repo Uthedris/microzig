@@ -31,7 +31,7 @@ const FIFOCommand = enum(u8) {
 
 const riscv_calling_convention: std.builtin.CallingConvention = .{ .riscv32_interrupt = .{ .mode = .machine } };
 
-pub fn configure(comptime RTTS: type) type {
+pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
     return struct {
         const Platform = @This();
 
@@ -59,43 +59,6 @@ pub fn configure(comptime RTTS: type) type {
         ///
         pub fn initialize_stack(in_stack: [*]usize, in_pc: *const fn () void) [*]usize {
 
-            // We want to duplicate what the stack looks like when a task is swapped out
-
-            //      +------------+
-            //      |  MEPC      | <- Stack pointer
-            //      |  MSTATUS   | +   1
-            //      |  gp        | +   2
-            //      |  tp        | +   3
-            //      |  t0        | +   4
-            //      |  t1        | +   5
-            //      |  t2        | +   6
-            //      |  t3        | +   7
-            //      |  t4        | +   8
-            //      |  t5        | +   9
-            //      |  t6        | +  10
-            //      |  a0        | +  11
-            //      |  a1        | +  12
-            //      |  a2        | +  13
-            //      |  a3        | +  14
-            //      |  a4        | +  15
-            //      |  a5        | +  16
-            //      |  a6        | +  17
-            //      |  a7        | +  18
-            //      |  s11       | +  19
-            //      |  s10       | +  20
-            //      |  s9        | +  21
-            //      |  s8        | +  22
-            //      |  s7        | +  23
-            //      |  s6        | +  24
-            //      |  s5        | +  25
-            //      |  s4        | +  26
-            //      |  s3        | +  27
-            //      |  s2        | +  28
-            //      |  s1        | +  29
-            //      |  s0        | +  30
-            //      |  ra        | +  31
-            //      +------------+
-
             var sp = in_stack - 32;
 
             for (sp[2..32]) |*reg| {
@@ -103,7 +66,7 @@ pub fn configure(comptime RTTS: type) type {
             }
 
             sp[0] = @intFromPtr(in_pc);
-            sp[1] = 0x0000_0340;
+            sp[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
 
             return sp;
         }
@@ -112,24 +75,19 @@ pub fn configure(comptime RTTS: type) type {
         /// Initialize the cores
         ///
         pub fn start_cores() noreturn {
-            // Set the priority of the PendSV exception to the lowest possible value
-
-            if (compatibility.chip == .RP2040) {
-                PPB.SHPR3.modify(.{ .PRI_14 = 0, .PRI_15 = 0 });
-            } else {
-                PPB.SHPR3.modify(.{ .PRI_14_3 = 0, .PRI_15_3 = 0 });
-            }
 
             // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = cpu.interrupt.exception.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
-            // _ = cpu.interrupt.exception.set_handler(.MachineSoftware, .{ .riscv = machine_software_exception_ISR });
+            // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
+            // _ = irq.set_handler(.MachineSoftware, .{ .riscv = machine_software_exception_ISR });
+
+            std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{debug_core(), RTTS.core_mask});
 
             if (RTTS.core_mask & 0x02 != 0) {
                 if (compatibility.chip == .RP2040) {
-                    _ = hal.irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
-                    _ = hal.irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
                 } else {
-                    _ = hal.irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
+                    _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
                 }
                 // Note: We don't enable these interrupts until after the other core is
                 // launched, so we don't mess with the launch sequence.
@@ -137,10 +95,10 @@ pub fn configure(comptime RTTS: type) type {
 
             // Set up null task stack
 
-            null_task_stack[null_task_stack_len - 2] = @intFromPtr(&null_task_loop);
-            null_task_stack[null_task_stack_len - 1] = 0x01000000;
+            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 32]);
 
-            null_task_stack_pointer = @intFromPtr(&null_task_stack[null_task_stack_len - 16]);
+            null_task_stack[0] = @intFromPtr(&null_task_loop);
+            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
 
             // Launch the other core
 
@@ -208,16 +166,65 @@ pub fn configure(comptime RTTS: type) type {
         //==============================================================================
         // Interrupt service routines
         //==============================================================================
-        // There are three ISR's that need to be registered.The
+        // These ISR's  need to be registered.
         //  1. me_ISR   - (Exception)
-        //  2. ms_ISR   - (Machine Software) The pendsv interrupt service routine
-        //  3. fifo_ISR - (???) The inter-core communication interrupt service routine
+        //  2. fifo_ISR    - (The inter-core communication interrupt service routine
+
+        //  For time functions?
+        //  3. mt_ISR   - (Machine Timer) The sysTick interrupt service routine
         //
-        //  4. mt_ISR   - (Machine Timer) The sysTick interrupt service routine
+        //  For intercore interrupt?
+        //  4. ms_ISR   - (Machine Software) The inter-core interrupt service routine
+
 
         //------------------------------------------------------------------------------
-        /// machine_exception interrupt service routine
+        /// Machine_exception interrupt service routine
         ///
+        /// This isr fires when machine exception is triggered.
+        /// We use this to handle ecall instructions.
+        ///
+        /// This ISR is registered as a naked function, so we can save the registers
+        /// and restore the registers in a predicable way. This function calls
+        /// "do_machine_exception" that does the actual dispatch in Zig.
+
+        // The riscv does not push anything when a trap happens.  After the save
+        // the stack (pointed to by sp) looks like this:
+        //
+        //      +------------+
+        //      |  MEPC      | <- Stack pointer
+        //      |  MSTATUS   | +   1
+        //      |  gp        | +   2
+        //      |  tp        | +   3
+        //      |  t0        | +   4
+        //      |  t1        | +   5
+        //      |  t2        | +   6
+        //      |  t3        | +   7
+        //      |  t4        | +   8
+        //      |  t5        | +   9
+        //      |  t6        | +  10
+        //      |  a0        | +  11
+        //      |  a1        | +  12
+        //      |  a2        | +  13
+        //      |  a3        | +  14
+        //      |  a4        | +  15
+        //      |  a5        | +  16
+        //      |  a6        | +  17
+        //      |  a7        | +  18
+        //      |  s11       | +  19
+        //      |  s10       | +  20
+        //      |  s9        | +  21
+        //      |  s8        | +  22
+        //      |  s7        | +  23
+        //      |  s6        | +  24
+        //      |  s5        | +  25
+        //      |  s4        | +  26
+        //      |  s3        | +  27
+        //      |  s2        | +  28
+        //      |  s1        | +  29
+        //      |  s0        | +  30
+        //      |  ra        | +  31
+        //      +------------+
+
         pub export fn machine_exception_ISR() callconv(.naked) noreturn {
             asm volatile (
                 \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
@@ -243,8 +250,10 @@ pub fn configure(comptime RTTS: type) type {
                 \\     sw      a5,  64(sp)
                 \\     sw      a6,  68(sp)
                 \\     sw      a7,  72(sp)
+                \\
                 \\     mv      a1, sp
                 \\     call    %[meh]
+                \\
                 \\     mv      sp, a0
                 \\     lw      ra, 0(sp)
                 \\     csrw    MEPC, ra
@@ -271,46 +280,62 @@ pub fn configure(comptime RTTS: type) type {
                 \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
                 \\     mret
                 :
-                : [meh] "i" (meh),
+                : [meh] "i" (do_machine_exception),
             );
         }
 
-        export fn meh(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
-            if (RTTS.current_task[core_id()]) |task| {
-                task.stack_pointer = sp;
-            } else {
-                // no need to save null task stack pointer
-            }
+        /// This function is called from the machine_exception_ISR
+        ///
+        /// It does the actual dispatching of the ecall instruction
+        ///
+        export fn do_machine_exception(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
 
-            switch (in_code) {
-                0 => // yield
-                {
-                    return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
-                },
-                1 => // significant_event
-                {
-                    for (&RTTS.sig_event) |*sig_event| {
-                        sig_event.* = true;
-                    }
-                    return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
-                },
-                2 => // wait
-                {
-                    if (RTTS.current_task[core_id()]) |task| {
-                        // We need to wait if we have a mask and no
-                        // mask bit has a corresponding event flag set.
-                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                            task.state = .waiting;
-                            return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
+            var ret_sp: [*]usize = sp;
+
+            const cause = cpu.csr.mcause.read().code;
+
+            if (cause == 0x08 or cause == 0x0b) {
+                // We got here due to an ecall instruction.  The what that works
+                // leaves the PC pointing to the ecall instruction itself.  We
+                // must bump it by four bytes to point to the next instruction.
+
+                sp[0] += 4;
+
+                // Dispatch the instruction. This may change the stack pointer.
+                // if a new task is dispatched.
+
+                switch (in_code) {
+                    0 => // yield
+                    {
+                        ret_sp = RTTS.find_next_task_sp(sp);
+                    },
+                    1 => // significant_event
+                    {
+                        for (&RTTS.sig_event) |*sig_event| {
+                            sig_event.* = true;
                         }
-                    }
-                },
-                else => {
-                    @panic("Unhandled machine exception code");
-                },
+                        ret_sp = RTTS.find_next_task_sp(sp);
+
+                        send_fifo_command(.dispatch, null, null);
+                    },
+                    2 => // wait
+                    {
+                        if (RTTS.current_task[core_id()]) |task| {
+                            // We need to wait if we have a mask and no
+                            // mask bit has a corresponding event flag set.
+                            if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
+                                task.state = .waiting;
+                                ret_sp = RTTS.find_next_task_sp(sp);
+                            }
+                        }
+                    },
+                    else => {
+                        std.log.err("Unhandled machine exception code: {d}", .{in_code});
+                    },
+                }
             }
 
-            return sp;
+            return ret_sp;
         }
 
         //------------------------------------------------------------------------------
@@ -377,6 +402,7 @@ pub fn configure(comptime RTTS: type) type {
 
             std.log.debug("{s}   done", .{debug_core()});
         }
+
         //==============================================================================
         // Local thread mode functions
         //==============================================================================
@@ -384,29 +410,32 @@ pub fn configure(comptime RTTS: type) type {
         //------------------------------------------------------------------------------
         /// Run the first task on this core
         fn run_first_task() noreturn {
+            std.log.debug("{s}Entered run_first_task", .{debug_core()});
+
             // Enable the FIFO interrupt
 
             if (RTTS.core_mask & 0x02 != 0) {
                 multicore.fifo.drain();
                 SIO.FIFO_ST.raw = 0;
 
-                // ### TODO ### Enable specific interrupts
-                // if (compatibility.chip == .RP2040) {
-                //     if (core_id() == 0) {
-                //         hal.irq.enable(.SIO_IRQ_PROC0);
-                //     } else {
-                //         hal.irq.enable(.SIO_IRQ_PROC1);
-                //     }
-                // } else {
-                //     hal.irq.enable(.SIO_IRQ_FIFO);
-                // }
+                if (compatibility.chip == .RP2040) {
+                    if (core_id() == 0) {
+                        irq.enable(.SIO_IRQ_PROC0);
+                    } else {
+                        irq.enable(.SIO_IRQ_PROC1);
+                    }
+                } else {
+                    irq.enable(.SIO_IRQ_FIFO);
 
-                cpu.interrupt.enable_interrupts();
+                    if (compatibility.arch == .riscv) {
+                        cpu.interrupt.core.enable(cpu.CoreInterrupt.MachineExternal);
+                    }
+                }
+
+                irq.globally_enable();
             }
 
             // Switch to the highest priority task
-
-            std.log.debug("{s}Entered run_first_task", .{debug_core()});
 
             var target_sp: [*]usize = &null_task_stack;
             var target_pc: usize = @intFromPtr(&null_task_loop);
@@ -423,20 +452,20 @@ pub fn configure(comptime RTTS: type) type {
                         // We found the task we want to run.  Get the initial PC from
                         // the initalized stack then clear the stack.
 
-                        target_pc = a_task.stack_pointer[14];
-                        target_sp = a_task.stack_pointer + 16;
+                        target_pc = a_task.stack_pointer[0];
+                        target_sp = a_task.stack_pointer + 32;
 
-                        std.log.debug("{s}   Starting task {s}", .{ debug_core(), @tagName(a_task.tag) });
+                        std.log.debug("{s}   Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ debug_core(), @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
                         break;
                     }
                 }
             }
 
             asm volatile (
-                \\    mv    sp, %[sp]       // Set the process stack pointer
-                \\    li    t0, 0x00000000  // Set the MSTATUS register to enable interrupts
+                \\    mv    sp, %[sp]        // Set the process stack pointer
+                \\    li    t0, 0x00001810   // Set the MSTATUS register
                 \\    csrs  MSTATUS, t0
-                \\    csrs  MEPC, %[pc]     // Set the MEPC register to the target PC
+                \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
                 \\    mret
                 :
                 : [sp] "r" (target_sp),
@@ -447,15 +476,55 @@ pub fn configure(comptime RTTS: type) type {
             unreachable;
         }
 
-        //------------------------------------------------------------------------------
-        /// Core1 initialization
-        fn core1_init() noreturn {
-            std.log.debug("{s}Init", .{debug_core()});
-            run_first_task();
-        }
         //==============================================================================
         // Local handler mode functions
         //==============================================================================
+        // These functions are with the scheduler mutex locked
+        // and must not be called from user mode.
+
+        //------------------------------------------------------------------------------
+        /// Send a command to the other core
+        /// Parameters:
+        ///   in_command - The command to send
+        ///   in_task    - The task the command applies to
+        ///   in_param   - The parameter to send
+        fn send_fifo_command(in_command: FIFOCommand, in_task: ?*RTTS.TaskItem, in_param: ?u32) void {
+            // If we're not using core1 then just return
+
+            if (RTTS.core_mask & 0x02 == 0) return;
+
+            // Compute and queue the command word:
+            //
+            // +---------+---------+---------+---------+
+            // |  0x80   | msg len |  command number   |
+            // +---------+---------+---------+---------+
+
+            var msg_len: usize = 1;
+
+            if (in_task != null) msg_len += 1;
+            if (in_param != null) msg_len += 1;
+
+            const command = 0x80000000 | (msg_len << 16) | @intFromEnum(in_command);
+
+            // If the send fifo is full then we have to  wait until the
+            // other core reads something off of the fifo so we can
+            // send some data.
+
+            // If the send fifo is full then ping the other core
+            // so that it reads something off of the fifo.
+
+            if (!multicore.fifo.is_write_ready()) cpu.sev();
+
+            multicore.fifo.write_blocking(command);
+
+            if (in_task) |task| {
+                multicore.fifo.write_blocking(@intFromPtr(task));
+            }
+
+            if (in_param) |param| {
+                multicore.fifo.write_blocking(param);
+            }
+        }
 
         //------------------------------------------------------------------------------
         /// Swap the context
@@ -476,10 +545,10 @@ pub fn configure(comptime RTTS: type) type {
         // Null Task
         //==============================================================================
 
-        const null_task_stack_len = 33;
+        const null_task_stack_len = 48;
 
         var null_task_stack: [null_task_stack_len]usize = undefined;
-        pub var null_task_stack_pointer: usize = undefined;
+        pub var null_task_stack_pointer: [*]usize = undefined;
 
         // ------------------------------------------------------------------------
         // The null task just calls wait for interrupt in an infinite loop.
