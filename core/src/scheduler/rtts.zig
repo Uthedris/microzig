@@ -106,9 +106,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             for (tasks) |task| {
                 size += task.stack_size;
             }
-            break :blk @Type(.{ .array = .{ .child = usize,
-                                            .len = size,
-                                            .sentinel_ptr = null } });
+            break :blk @Type(.{ .array = .{ .child = usize, .len = size, .sentinel_ptr = null } });
         } = undefined;
 
         /// The task tag type.  An enum of task name with values of task index.
@@ -169,19 +167,17 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 last_task = &task_list[i];
 
-
                 std.log.debug("Initialized task \"{s}\":", .{task.name});
                 std.log.debug("  func: {any}", .{task.func});
                 std.log.debug("  stack_size: {d}", .{task.stack_size});
                 std.log.debug("  stack: {any}", .{task_list[i].stack_pointer});
-                std.log.debug("  event_flags: {x}", .{ task_list[i].event_flags } );
-                std.log.debug("  event_mask: {x}", .{ task_list[i].event_mask } );
-                std.log.debug("  state: {s}", .{ @tagName(task_list[i].state) } );
+                std.log.debug("  event_flags: {x}", .{task_list[i].event_flags});
+                std.log.debug("  event_mask: {x}", .{task_list[i].event_mask});
+                std.log.debug("  state: {s}", .{@tagName(task_list[i].state)});
 
                 for (0..16) |j| {
                     std.log.debug("  sp + {d:2}: 0x{X:08}", .{ j, task_list[i].stack_pointer[j] });
                 }
-
             }
 
             platform.start_cores();
@@ -306,7 +302,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 a_task = a_task.next;
             }
 
-
             return priority;
         }
 
@@ -338,15 +333,13 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // Link a back into priority list
                 task_a.next = task_b.next;
                 task_b.next = task_a;
-            }
-            else{
+            } else {
                 task_a.next = highest_priority_task;
                 highest_priority_task = task_a;
             }
 
             platform.significant_event();
         }
-
 
         //============================================================================
         // Internal Use Only
