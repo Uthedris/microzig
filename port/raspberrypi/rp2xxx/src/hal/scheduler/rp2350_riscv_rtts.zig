@@ -57,54 +57,53 @@ pub fn configure(comptime RTTS: type) type {
         //------------------------------------------------------------------------------
         /// Initialize the stack for a task as though it had been swapped out
         ///
-            pub fn initialize_stack(in_stack: [*]usize, in_pc: *const fn () void) [*]usize {
+        pub fn initialize_stack(in_stack: [*]usize, in_pc: *const fn () void) [*]usize {
 
             // We want to duplicate what the stack looks like when a task is swapped out
 
             //      +------------+
-            //      |  r6  x31   | <- Stack pointer
-            //      |  t5  x30   | +   1
-            //      |  t4  x29   | +   2
-            //      |  t3  x28   | +   3
-            //      |  s11 x27   | +   4
-            //      |  s10 x26   | +   5
-            //      |  s9  x25   | +   6
-            //      |  s8  x24   | +   7
-            //      |  s7  x23   | +   8
-            //      |  s6  x22   | +   9
-            //      |  s5  x21   | +  10
-            //      |  s4  x20   | +  11
-            //      |  s3  x19   | +  12
-            //      |  s2  x18   | +  13
-            //      |  a7  x17   | +  14
-            //      |  a6  x16   | +  15
-            //      |  a5  x15   | +  16
-            //      |  a4  x14   | +  17
-            //      |  a3  x13   | +  18
-            //      |  a2  x12   | +  19
-            //      |  a1  x11   | +  20
-            //      |  a0  x10   | +  21
-            //      |  s1  x9    | +  22
-            //      |  s0  x8    | +  23
-            //      |  t2  x7    | +  24
-            //      |  t1  x6    | +  25
-            //      |  t0  x5    | +  26
-            //      |  tp  x4    | +  27
-            //      |  gp  x3    | +  28
-            //      |  sp  x2    | +  29
-            //      |  ra  x1    | +  30
-            //      |      pc    | +  31 // from MEPC
-            //      |      MSTAT | +  32 // from MSTATUS
+            //      |  MEPC      | <- Stack pointer
+            //      |  MSTATUS   | +   1
+            //      |  gp        | +   2
+            //      |  tp        | +   3
+            //      |  t0        | +   4
+            //      |  t1        | +   5
+            //      |  t2        | +   6
+            //      |  t3        | +   7
+            //      |  t4        | +   8
+            //      |  t5        | +   9
+            //      |  t6        | +  10
+            //      |  a0        | +  11
+            //      |  a1        | +  12
+            //      |  a2        | +  13
+            //      |  a3        | +  14
+            //      |  a4        | +  15
+            //      |  a5        | +  16
+            //      |  a6        | +  17
+            //      |  a7        | +  18
+            //      |  s11       | +  19
+            //      |  s10       | +  20
+            //      |  s9        | +  21
+            //      |  s8        | +  22
+            //      |  s7        | +  23
+            //      |  s6        | +  24
+            //      |  s5        | +  25
+            //      |  s4        | +  26
+            //      |  s3        | +  27
+            //      |  s2        | +  28
+            //      |  s1        | +  29
+            //      |  s0        | +  30
+            //      |  ra        | +  31
             //      +------------+
 
-            var sp = in_stack - 33;
+            var sp = in_stack - 32;
 
-            for (sp[0..30]) |*reg| {
+            for (sp[2..32]) |*reg| {
                 reg.* = 0xface_fade; // so we can spot bad values
             }
 
-            sp[30] = @intFromPtr(in_pc);
-            sp[31] = 0x0000_0340;
+            sp[0] = @intFromPtr(in_pc);
+            sp[1] = 0x0000_0340;
 
             return sp;
         }
@@ -219,23 +218,105 @@ pub fn configure(comptime RTTS: type) type {
         //------------------------------------------------------------------------------
         /// machine_exception interrupt service routine
         ///
-        pub export fn machine_exception_ISR() callconv(riscv_calling_convention) void {
-            switch (csr.mcause.read().code) {
-                0x8 => // ecall in User mode
-                {},
-                0xb => // ecall in Machine mode
-                {},
+        pub export fn machine_exception_ISR() callconv(.naked) noreturn {
+            asm volatile (
+                \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
+                \\     addi    sp, sp, -64
+                \\     csrr    ra,  MEPC
+                \\     sw      ra,  0(sp)
+                \\     csrr    ra,  MSTATUS
+                \\     sw      ra,  4(sp)
+                \\     sw      gp,  8(sp)
+                \\     sw      tp,  12(sp)
+                \\     sw      t0,  16(sp)
+                \\     sw      t1,  20(sp)
+                \\     sw      t2,  24(sp)
+                \\     sw      t3,  28(sp)
+                \\     sw      t4,  32(sp)
+                \\     sw      t5,  36(sp)
+                \\     sw      t6,  40(sp)
+                \\     sw      a0,  44(sp)
+                \\     sw      a1,  48(sp)
+                \\     sw      a2,  52(sp)
+                \\     sw      a3,  56(sp)
+                \\     sw      a4,  60(sp)
+                \\     sw      a5,  64(sp)
+                \\     sw      a6,  68(sp)
+                \\     sw      a7,  72(sp)
+                \\     mv      a1, sp
+                \\     call    %[meh]
+                \\     mv      sp, a0
+                \\     lw      ra, 0(sp)
+                \\     csrw    MEPC, ra
+                \\     lw      ra, 4(sp)
+                \\     csrw    MSTATUS, ra
+                \\     lw      gp,  8(sp)
+                \\     lw      tp,  12(sp)
+                \\     lw      t0,  16(sp)
+                \\     lw      t1,  20(sp)
+                \\     lw      t2,  24(sp)
+                \\     lw      t3,  28(sp)
+                \\     lw      t4,  32(sp)
+                \\     lw      t5,  36(sp)
+                \\     lw      t6,  40(sp)
+                \\     lw      a0,  44(sp)
+                \\     lw      a1,  48(sp)
+                \\     lw      a2,  52(sp)
+                \\     lw      a3,  56(sp)
+                \\     lw      a4,  60(sp)
+                \\     lw      a5,  64(sp)
+                \\     lw      a6,  68(sp)
+                \\     lw      a7,  72(sp)
+                \\     addi    sp,  sp, 64
+                \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
+                \\     mret
+                :
+                : [meh] "i" (meh),
+            );
+        }
+
+        export fn meh(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
+            if (RTTS.current_task[core_id()]) |task| {
+                task.stack_pointer = sp;
+            } else {
+                // no need to save null task stack pointer
+            }
+
+            switch (in_code) {
+                0 => // yield
+                {
+                    return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
+                },
+                1 => // significant_event
+                {
+                    for (&RTTS.sig_event) |*sig_event| {
+                        sig_event.* = true;
+                    }
+                    return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
+                },
+                2 => // wait
+                {
+                    if (RTTS.current_task[core_id()]) |task| {
+                        // We need to wait if we have a mask and no
+                        // mask bit has a corresponding event flag set.
+                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
+                            task.state = .waiting;
+                            return @ptrFromInt(RTTS.find_next_task_sp(@intFromPtr(sp)));
+                        }
+                    }
+                },
                 else => {
-                    @panic("Unhandled machine exception");
+                    @panic("Unhandled machine exception code");
                 },
             }
+
+            return sp;
         }
 
         //------------------------------------------------------------------------------
         /// machine_exception interrupt service routine
         ///
-        pub export fn machine_software_exception_ISR() callconv(riscv_calling_convention) void {
-        }
+        pub export fn machine_software_exception_ISR() callconv(riscv_calling_convention) void {}
 
         //------------------------------------------------------------------------------
         /// FIFO interrupt service routine
@@ -379,19 +460,17 @@ pub fn configure(comptime RTTS: type) type {
         //------------------------------------------------------------------------------
         /// Swap the context
         ///
-         fn swap_context( in_new_task: *RTTS.TaskItem ) void
-         {
-             const task = RTTS.current_task[core_id()];
+        fn swap_context(in_new_task: *RTTS.TaskItem) void {
+            const task = RTTS.current_task[core_id()];
 
-             if (task) |old_task| {
+            if (task) |old_task| {
                 if (old_task != in_new_task) {
                     old_task.state = .runnable;
                     in_new_task.state = .running;
                     RTTS.current_task[core_id()] = in_new_task;
                 }
-             }
-         }
-
+            }
+        }
 
         //==============================================================================
         // Null Task
