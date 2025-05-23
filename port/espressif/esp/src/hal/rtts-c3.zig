@@ -337,27 +337,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //==============================================================================
-        // Local handler mode functions
-        //==============================================================================
-        // These functions are with the scheduler mutex locked
-        // and must not be called from user mode.
-
-        //------------------------------------------------------------------------------
-        /// Swap the context
-        ///
-        fn swap_context(in_new_task: *RTTS.TaskItem) void {
-            const task = RTTS.current_task[core_id()];
-
-            if (task) |old_task| {
-                if (old_task != in_new_task) {
-                    old_task.state = .runnable;
-                    in_new_task.state = .running;
-                    RTTS.current_task[core_id()] = in_new_task;
-                }
-            }
-        }
-
-        //==============================================================================
         // Null Task
         //==============================================================================
 
