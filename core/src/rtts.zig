@@ -1,8 +1,7 @@
 const std = @import("std");
-// const microzig = @import("../microzig.zig");
 
 pub const hal = @import("hal");
-pub const interrupt = @import("../interrupt.zig");
+pub const interrupt = @import("interrupt.zig");
 
 const time = hal.time;
 
