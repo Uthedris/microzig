@@ -33,10 +33,10 @@ pub const compatibility = @import("hal/compatibility.zig");
 pub const image_def = @import("hal/image_def.zig");
 
 pub const rtts = switch (compatibility.chip) {
-    .RP2040 => @import("hal/scheduler/rp2xxx_arm_rtts.zig"),
+    .RP2040 => @import("hal/rtts_arm.zig"),
     .RP2350 => switch (compatibility.arch) {
-        .arm => @import("hal/scheduler/rp2xxx_arm_rtts.zig"),
-        .riscv => @import("hal/scheduler/rp2350_riscv_rtts.zig"),
+        .arm => @import("hal/rtts_arm.zig"),
+        .riscv => @import("hal/rtts_riscv.zig"),
     },
 };
 
