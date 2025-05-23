@@ -97,6 +97,14 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Initialize the cores
         ///
         pub fn start_cores() noreturn {
+
+            // Set up null task stack
+
+            null_task_stack[null_task_stack_len - 2] = @intFromPtr(&null_task_loop);
+            null_task_stack[null_task_stack_len - 1] = 0x01000000;
+
+            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 16]);
+
             // Set the priority of the PendSV exception to the lowest possible value
 
             if (compatibility.chip == .RP2040) {
@@ -108,6 +116,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             _ = cpu.interrupt.exception.set_handler(.SVCall, .{ .naked = svc_ISR });
             _ = cpu.interrupt.exception.set_handler(.PendSV, .{ .naked = pendsv_ISR });
 
+            // Setup for multiple cores if configured.
+
             if (RTTS.core_mask & 0x02 != 0) {
                 if (compatibility.chip == .RP2040) {
                     _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
@@ -117,27 +127,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 }
                 // Note: We don't enable these interrupts until after the other core is
                 // launched, so we don't mess with the launch sequence.
-            }
 
-            // Set up null task stack
-
-            null_task_stack[null_task_stack_len - 2] = @intFromPtr(&null_task_loop);
-            null_task_stack[null_task_stack_len - 1] = 0x01000000;
-
-            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 16]);
-
-            // Launch the other core
-
-            if (RTTS.core_mask & 0x02 != 0) {
-                multicore.launch_core1(blk: {
-                    const s = struct {
-                        fn core1_init() noreturn {
-                            run_first_task();
-                        }
-                    };
-
-                    break :blk s.core1_init;
-                });
+                multicore.launch_core1(run_first_task);
             }
 
             run_first_task();
@@ -162,6 +153,76 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn wait() void {
             asm volatile ("svc #2");
+        }
+
+        //==============================================================================
+        // Local thread mode functions
+        //==============================================================================
+
+        //------------------------------------------------------------------------------
+        /// Run the first task on this core
+        fn run_first_task() noreturn {
+            std.log.debug("{s}Entered run_first_task", .{debug_core()});
+
+            // Enable the FIFO interrupt
+
+            if (RTTS.core_mask & 0x02 != 0) {
+                multicore.fifo.drain();
+                SIO.FIFO_ST.raw = 0;
+
+                if (compatibility.chip == .RP2040) {
+                    if (core_id() == 0) {
+                        irq.enable(.SIO_IRQ_PROC0);
+                    } else {
+                        irq.enable(.SIO_IRQ_PROC1);
+                    }
+                } else {
+                    irq.enable(.SIO_IRQ_FIFO);
+                }
+
+                irq.globally_enable();
+            }
+
+            // Find the highest priority task.  If launched on multiple
+            // cores, each will pick a different task.
+
+            var target_sp: [*]usize = &null_task_stack;
+            var target_pc: usize = @intFromPtr(&null_task_loop);
+
+            {
+                RTTS.schedule_mutex.lock();
+                defer RTTS.schedule_mutex.unlock();
+
+                for (&RTTS.task_list) |*a_task| {
+                    if (a_task.state == .runnable) {
+                        RTTS.current_task[core_id()] = a_task;
+                        a_task.state = .running;
+
+                        // We found the task we want to run.  Get the initial PC from
+                        // the initalized stack then clear the stack.
+
+                        target_pc = a_task.stack_pointer[14];
+                        target_sp = a_task.stack_pointer + 16;
+
+                        std.log.debug("{s}   Starting task {s}", .{ debug_core(), @tagName(a_task.tag) });
+                        break;
+                    }
+                }
+            }
+
+            asm volatile (
+                \\    msr   PSP, %[sp]   @ Set the process stack pointer
+                \\    movs  r0, #02
+                \\    msr   CONTROL, r0  @ Set the control register (use PSP)
+                \\    mov   sp, %[sp]    @ Set the stack pointer
+                \\    bx    %[pc]        @ Branch to the target PC
+                :
+                : [sp] "r" (target_sp),
+                  [pc] "r" (target_pc),
+                : "r0"
+            );
+
+            unreachable;
         }
 
         //==============================================================================
@@ -480,75 +541,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             }
 
             std.log.debug("{s}   done", .{debug_core()});
-        }
-
-        //==============================================================================
-        // Local thread mode functions
-        //==============================================================================
-
-        //------------------------------------------------------------------------------
-        /// Run the first task on this core
-        fn run_first_task() noreturn {
-            // Enable the FIFO interrupt
-
-            if (RTTS.core_mask & 0x02 != 0) {
-                multicore.fifo.drain();
-                SIO.FIFO_ST.raw = 0;
-
-                if (compatibility.chip == .RP2040) {
-                    if (core_id() == 0) {
-                        irq.enable(.SIO_IRQ_PROC0);
-                    } else {
-                        irq.enable(.SIO_IRQ_PROC1);
-                    }
-                } else {
-                    irq.enable(.SIO_IRQ_FIFO);
-                }
-
-                irq.globally_enable();
-            }
-
-            // Switch to the highest priority task
-
-            std.log.debug("{s}Entered run_first_task", .{debug_core()});
-
-            var target_sp: [*]usize = &null_task_stack;
-            var target_pc: usize = @intFromPtr(&null_task_loop);
-
-            {
-                RTTS.schedule_mutex.lock();
-                defer RTTS.schedule_mutex.unlock();
-
-                for (&RTTS.task_list) |*a_task| {
-                    if (a_task.state == .runnable) {
-                        RTTS.current_task[core_id()] = a_task;
-                        a_task.state = .running;
-
-                        // We found the task we want to run.  Get the initial PC from
-                        // the initalized stack then clear the stack.
-
-                        target_pc = a_task.stack_pointer[14];
-                        target_sp = a_task.stack_pointer + 16;
-
-                        std.log.debug("{s}   Starting task {s}", .{ debug_core(), @tagName(a_task.tag) });
-                        break;
-                    }
-                }
-            }
-
-            asm volatile (
-                \\    msr   PSP, %[sp]   @ Set the process stack pointer
-                \\    movs  r0, #02
-                \\    msr   CONTROL, r0  @ Set the control register (use PSP)
-                \\    mov   sp, %[sp]    @ Set the stack pointer
-                \\    bx    %[pc]        @ Branch to the target PC
-                :
-                : [sp] "r" (target_sp),
-                  [pc] "r" (target_pc),
-                : "r0"
-            );
-
-            unreachable;
         }
 
         //==============================================================================

@@ -382,11 +382,12 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
 
-            // If current task is running, set it to runnable and save its stack pointer
+            // Save the stack pointer for the current task and, if it was running,
+            // set it to runnable.
 
             if (current_task[platform.core_id()]) |task| {
-                if (task.state == .running) task.state = .runnable;
                 task.stack_pointer = in_sp;
+                if (task.state == .running) task.state = .runnable;
             }
 
             // Figure out where to start our scan
@@ -434,11 +435,13 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 if (core_mask & (@as(u8, 1) << @intCast(i)) == 0) continue;
 
                 if (current_task[i]) |a_task| {
+                    std.log.debug("{s}  core {d} has task {s}", .{ platform.debug_core(), i, @tagName(a_task.tag) });
                     if (priority_compare(a_task, retval) < 0) {
                         retval = a_task;
                     }
                 } else {
                     // Found null task -- it's always the lowest priority
+                    std.log.debug("{s}  core {d} has null task", .{ platform.debug_core(), i });
                     return null;
                 }
             }

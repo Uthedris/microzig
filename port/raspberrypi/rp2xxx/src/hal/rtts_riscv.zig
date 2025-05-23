@@ -50,6 +50,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             return @intCast(hal.get_cpu_id());
         }
 
+        /// Get a string that can be used to identify the current core for debug messages.
+        ///
         pub fn debug_core() []const u8 {
             return if (core_id() == 0) "Core 0 " else "Core 1                                       ";
         }
@@ -76,22 +78,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn start_cores() noreturn {
 
-            // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
-
-            std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{debug_core(), RTTS.core_mask});
-
-            if (RTTS.core_mask & 0x02 != 0) {
-                if (compatibility.chip == .RP2040) {
-                    _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
-                    _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
-                } else {
-                    _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
-                }
-                // Note: We don't enable these interrupts until after the other core is
-                // launched, so we don't mess with the launch sequence.
-            }
-
             // Set up null task stack
 
             null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 32]);
@@ -99,18 +85,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             null_task_stack[0] = @intFromPtr(&null_task_loop);
             null_task_stack[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
 
-            // Launch the other core
+            // ### TODO ### uncomment below when we allow these to be set at runtime
+            // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
+
+            std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{debug_core(), RTTS.core_mask});
+
+            // Setup for multiple cores if configured.
 
             if (RTTS.core_mask & 0x02 != 0) {
-                multicore.launch_core1(blk: {
-                    const s = struct {
-                        fn core1_init() noreturn {
-                            run_first_task();
-                        }
-                    };
+                _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
 
-                    break :blk s.core1_init;
-                });
+                // Note: We don't enable this interrupt until after the other core is
+                // launched, so we don't mess with the launch sequence. It will be
+                // enabled in run_first_task.
+
+                multicore.launch_core1(run_first_task);
             }
 
             run_first_task();
@@ -144,22 +133,72 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\ li    a0, 2
                 \\ ecall
             );
+        }
 
-            //   else
-            //   {
-            //     if (RTTS.current_task[core_id()]) |task|
-            //     {
-            //       // We need to wait if we have a mask and no
-            //       // mask bit has a corresponding event flag set.
-            //       if (    task.event_mask != 0
-            //           and task.event_mask & task.event_flags == 0)
-            //       {
-            //         task.state = .waiting;
-            //         scb.ICSR.modify( .{ .PENDSVSET = 1 });
-            //         asm volatile ( "isb" );
-            //       }
-            //     }
+        //==============================================================================
+        // Local thread mode functions
+        //==============================================================================
 
+        //------------------------------------------------------------------------------
+        /// Run the first task on this core
+        fn run_first_task() noreturn {
+            std.log.debug("{s}Entered run_first_task", .{debug_core()});
+
+            // Enable the FIFO interrupt if we are running on multiple cores.
+
+            if (RTTS.core_mask & 0x02 != 0) {
+                multicore.fifo.drain();
+                SIO.FIFO_ST.raw = 0;
+
+                irq.enable(.SIO_IRQ_FIFO);
+
+                if (compatibility.arch == .riscv) {
+                    cpu.interrupt.core.enable(cpu.CoreInterrupt.MachineExternal);
+                }
+
+                irq.globally_enable();
+            }
+
+            // Find the highest priority task.  If launched on multiple
+            // cores, each will pick a different task.
+
+            var target_sp: [*]usize = &null_task_stack;
+            var target_pc: usize = @intFromPtr(&null_task_loop);
+
+            {
+                RTTS.schedule_mutex.lock();
+                defer RTTS.schedule_mutex.unlock();
+
+                for (&RTTS.task_list) |*a_task| {
+                    if (a_task.state == .runnable) {
+                        RTTS.current_task[core_id()] = a_task;
+                        a_task.state = .running;
+
+                        // We found the task we want to run.  Get the initial PC from
+                        // the initalized stack then clear the stack.
+
+                        target_pc = a_task.stack_pointer[0];
+                        target_sp = a_task.stack_pointer + 32;
+
+                        std.log.debug("{s}   Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ debug_core(), @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
+                        break;
+                    }
+                }
+            }
+
+            asm volatile (
+                \\    mv    sp, %[sp]        // Set the process stack pointer
+                \\    li    t0, 0x00001810   // Set the MSTATUS register
+                \\    csrs  MSTATUS, t0
+                \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
+                \\    mret
+                :
+                : [sp] "r" (target_sp),
+                  [pc] "r" (target_pc),
+                : "t0"
+            );
+
+            unreachable;
         }
 
         //==============================================================================
@@ -398,82 +437,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //==============================================================================
-        // Local thread mode functions
-        //==============================================================================
-
-        //------------------------------------------------------------------------------
-        /// Run the first task on this core
-        fn run_first_task() noreturn {
-            std.log.debug("{s}Entered run_first_task", .{debug_core()});
-
-            // Enable the FIFO interrupt
-
-            if (RTTS.core_mask & 0x02 != 0) {
-                multicore.fifo.drain();
-                SIO.FIFO_ST.raw = 0;
-
-                if (compatibility.chip == .RP2040) {
-                    if (core_id() == 0) {
-                        irq.enable(.SIO_IRQ_PROC0);
-                    } else {
-                        irq.enable(.SIO_IRQ_PROC1);
-                    }
-                } else {
-                    irq.enable(.SIO_IRQ_FIFO);
-
-                    if (compatibility.arch == .riscv) {
-                        cpu.interrupt.core.enable(cpu.CoreInterrupt.MachineExternal);
-                    }
-                }
-
-                irq.globally_enable();
-            }
-
-            // Switch to the highest priority task
-
-            var target_sp: [*]usize = &null_task_stack;
-            var target_pc: usize = @intFromPtr(&null_task_loop);
-
-            {
-                RTTS.schedule_mutex.lock();
-                defer RTTS.schedule_mutex.unlock();
-
-                for (&RTTS.task_list) |*a_task| {
-                    if (a_task.state == .runnable) {
-                        RTTS.current_task[core_id()] = a_task;
-                        a_task.state = .running;
-
-                        // We found the task we want to run.  Get the initial PC from
-                        // the initalized stack then clear the stack.
-
-                        target_pc = a_task.stack_pointer[0];
-                        target_sp = a_task.stack_pointer + 32;
-
-                        std.log.debug("{s}   Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ debug_core(), @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
-                        break;
-                    }
-                }
-            }
-
-            asm volatile (
-                \\    mv    sp, %[sp]        // Set the process stack pointer
-                \\    li    t0, 0x00001810   // Set the MSTATUS register
-                \\    csrs  MSTATUS, t0
-                \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
-                \\    mret
-                :
-                : [sp] "r" (target_sp),
-                  [pc] "r" (target_pc),
-                : "t0"
-            );
-
-            unreachable;
-        }
-
-        //==============================================================================
         // Local handler mode functions
         //==============================================================================
-        // These functions are with the scheduler mutex locked
+        // These functions are for use with the scheduler mutex locked
         // and must not be called from user mode.
 
         //------------------------------------------------------------------------------
@@ -482,6 +448,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///   in_command - The command to send
         ///   in_task    - The task the command applies to
         ///   in_param   - The parameter to send
+        ///
         fn send_fifo_command(in_command: FIFOCommand, in_task: ?*RTTS.TaskItem, in_param: ?u32) void {
             // If we're not using core1 then just return
 
@@ -517,21 +484,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             if (in_param) |param| {
                 multicore.fifo.write_blocking(param);
-            }
-        }
-
-        //------------------------------------------------------------------------------
-        /// Swap the context
-        ///
-        fn swap_context(in_new_task: *RTTS.TaskItem) void {
-            const task = RTTS.current_task[core_id()];
-
-            if (task) |old_task| {
-                if (old_task != in_new_task) {
-                    old_task.state = .runnable;
-                    in_new_task.state = .running;
-                    RTTS.current_task[core_id()] = in_new_task;
-                }
             }
         }
 
