@@ -61,3 +61,8 @@ pub inline fn can_set_handler() bool {
 pub fn set_handler(comptime int: cpu.ExternalInterrupt, handler: ?cpu.Handler) ?cpu.Handler {
     return interrupt.set_handler(int, handler);
 }
+
+/// Returns true, when the interrupt vectors are stored in RAM.
+pub fn has_ram_vectors() bool {
+    return interrupt.has_ram_vectors();
+}

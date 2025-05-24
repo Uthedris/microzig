@@ -46,18 +46,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //------------------------------------------------------------------------------
         /// Get the ID of the current core.  We only have one so it is always 1
         ///
-        pub fn core_id() u8 { return 1; }
+        pub fn core_id() u8 {
+            return 1;
+        }
 
         //------------------------------------------------------------------------------
         /// Get the name of the current core.  We only have one so it is always ""
         ///
-        pub fn debug_core() []const u8 { return ""; }
+        pub fn debug_core() []const u8 {
+            return "";
+        }
 
         //------------------------------------------------------------------------------
         /// Initialize the stack for a task as though it had been swapped out
         ///
         pub fn initialize_stack(in_stack: [*]usize, in_pc: *const fn () void) [*]usize {
-
             var sp = in_stack - 32;
 
             for (sp[2..32]) |*reg| {
@@ -125,7 +128,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //==============================================================================
         // These ISR's  need to be registered.
         //  1. me_ISR   - (Exception)
-
 
         //------------------------------------------------------------------------------
         /// Machine_exception interrupt service routine
@@ -239,7 +241,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// It does the actual dispatching of the ecall instruction
         ///
         export fn do_machine_exception(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
-
             var ret_sp: [*]usize = sp;
 
             const cause = cpu.csr.mcause.read().code;

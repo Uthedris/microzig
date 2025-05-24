@@ -10,6 +10,50 @@ const SIO = peripherals.SIO;
 const PSM = peripherals.PSM;
 const PPB = peripherals.PPB;
 
+pub const doorbell = if (microzig.hal.compatibility.chip == .RP2350)
+    struct {
+        /// Send the indicated doorbell to the other core
+        pub fn set(bell: u3) void {
+            const mask = @as(u8, 1) << bell;
+            SIO.DOORBELL_OUT_SET.raw = mask;
+        }
+
+        /// Clear the indicated doorbell from the other core
+        pub fn clear(bell: u3) void {
+            const mask = @as(u8, 1) << bell;
+            SIO.DOORBELL_OUT_CLR.raw = mask;
+        }
+
+        /// Check if the indicated doorbell is set on the other core
+        pub fn is_out_set(bell: u3) bool {
+            const mask = @as(u8, 1) << bell;
+            return SIO.DOORBELL_OUT_SET.raw & mask != 0;
+        }
+
+        /// Check if the indicated doorbell is set on the this core
+        pub fn is_in_set(bell: u3) bool {
+            const mask = @as(u8, 1) << bell;
+            return SIO.DOORBELL_IN_SET.raw & mask != 0;
+        }
+
+        /// Get and clear the indicated doorbell on the this core
+        pub fn get_and_clear(bell: u3) bool {
+            const mask = @as(u8, 1) << bell;
+            const result = SIO.DOORBELL_IN_SET.raw & mask != 0;
+            SIO.DOORBELL_IN_CLR.raw = mask;
+            return result;
+        }
+
+        /// Read and clear all doorbells on the this core
+        pub fn read_and_clear() u8 {
+            const result = SIO.DOORBELL_IN_SET.raw;
+            SIO.DOORBELL_IN_CLR.raw = result;
+            return @truncate(result);
+        }
+    }
+else
+    void;
+
 pub const fifo = struct {
     /// Check if the FIFO has valid data for reading.
     pub fn is_read_ready() bool {

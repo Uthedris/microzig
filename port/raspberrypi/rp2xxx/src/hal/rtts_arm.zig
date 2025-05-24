@@ -47,7 +47,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // platform specific functionality.
 
         //------------------------------------------------------------------------------
-        /// Get the ID of the current core
+        /// Get the index of the current core [0..RTTS.core_count]
         ///
         pub fn core_id() u8 {
             return @intCast(hal.get_cpu_id());
@@ -118,17 +118,19 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // Setup for multiple cores if configured.
 
-            if (RTTS.core_mask & 0x02 != 0) {
-                if (compatibility.chip == .RP2040) {
-                    _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
-                    _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
-                } else {
-                    _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
-                }
-                // Note: We don't enable these interrupts until after the other core is
-                // launched, so we don't mess with the launch sequence.
+            if (irq.has_ram_vectors()) {
+                if (RTTS.core_count > 1) {
+                    if (compatibility.chip == .RP2040) {
+                        _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
+                        _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
+                    } else {
+                        _ = irq.set_handler(.SIO_IRQ_BELL, .{ .c = doorbell_ISR });
+                    }
+                    // Note: We don't enable these interrupts until after the other core is
+                    // launched, so we don't mess with the launch sequence.
 
-                multicore.launch_core1(run_first_task);
+                    multicore.launch_core1(run_first_task);
+                }
             }
 
             run_first_task();
@@ -166,7 +168,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // Enable the FIFO interrupt
 
-            if (RTTS.core_mask & 0x02 != 0) {
+            if (RTTS.core_count > 1) {
                 multicore.fifo.drain();
                 SIO.FIFO_ST.raw = 0;
 
@@ -177,7 +179,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                         irq.enable(.SIO_IRQ_PROC1);
                     }
                 } else {
-                    irq.enable(.SIO_IRQ_FIFO);
+                    _ = multicore.doorbell.read_and_clear();
+                    irq.enable(.SIO_IRQ_BELL);
                 }
 
                 irq.globally_enable();
@@ -349,7 +352,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // we can do the dispatch directly and return the new stack pointer.
 
         fn do_SVC(in_sp: [*]usize, in_pc: usize, in_handler_mode: bool) callconv(.c) [*]usize {
-
             const svc_id: SvcID = @enumFromInt(@as(*u16, @ptrFromInt(in_pc - 2)).* & 0xff);
 
             // std.log.debug("do_SVC: svc_id: {s} in_sp: 0x{x:08} in_pc: 0x{x:08} handler_mode: {s}", .{@tagName(svc_id), @intFromPtr(in_sp), in_pc, if (in_handler_mode) "true" else "false"});
@@ -358,24 +360,32 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             //     std.log.debug("    sp +{d:3}  0x{x:08}", .{i * 4, in_sp[i]});
             // }
 
+            std.log.debug("{s}  Dispatch: {s}", .{ debug_core(), @tagName(svc_id) });
+
             switch (svc_id) {
-                .yield =>
-                {
-                    // ### TODO ### Should we do anything if we are in handler mode?
-                    if (in_handler_mode) {
-                        scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                        asm volatile ("isb");
-                    } else {
-                        return RTTS.find_next_task_sp(in_sp);
+                .yield => {
+                    if (!in_handler_mode) {
+                        if (RTTS.current_task[core_id()]) |task| {
+                            task.state = .yielded;
+                            return RTTS.find_next_task_sp(in_sp);
+                        }
+                    }
+                    else {
+                        std.log.err("Yield ignored from handler mode", .{});
                     }
                 },
-                .significant_event =>
-                {
+                .significant_event => {
                     for (&RTTS.sig_event) |*sig_event| {
                         sig_event.* = true;
                     }
 
-                    send_fifo_command(.dispatch, null, null);
+                    if (RTTS.core_count > 1) {
+                        if (compatibility.chip == .RP2040) {
+                            send_fifo_command(.dispatch, null, null);
+                        } else {
+                            multicore.doorbell.set(0);
+                        }
+                    }
 
                     if (in_handler_mode) {
                         scb.ICSR.modify(.{ .PENDSVSET = 1 });
@@ -384,20 +394,25 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                         return RTTS.find_next_task_sp(in_sp);
                     }
                 },
-                .wait =>
-                {
-                    if (RTTS.current_task[core_id()]) |task| {
-                        // We need to wait if we have a mask and no
-                        // mask bit has a corresponding event flag set.
-                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                            task.state = .waiting;
-                            if (in_handler_mode) {
-                                scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                                asm volatile ("isb");
-                            } else {
-                                return RTTS.find_next_task_sp(in_sp);
+                .wait => {
+                    if (!in_handler_mode) {
+                        if (RTTS.current_task[core_id()]) |task| {
+                            // We need to wait if we have a mask and no
+                            // mask bit has a corresponding event flag set.
+
+                            if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
+                                task.state = .waiting;
+                                if (in_handler_mode) {
+                                    scb.ICSR.modify(.{ .PENDSVSET = 1 });
+                                    asm volatile ("isb");
+                                } else {
+                                    return RTTS.find_next_task_sp(in_sp);
+                                }
                             }
                         }
+                    }
+                    else {
+                        std.log.err("Wait ignored from handler mode", .{});
                     }
                 },
             }
@@ -543,6 +558,17 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             std.log.debug("{s}   done", .{debug_core()});
         }
 
+        //------------------------------------------------------------------------------
+        /// Doorbell interrupt service routine
+        ///
+        ///
+        pub fn doorbell_ISR() callconv(.c) void {
+            _ = multicore.doorbell.read_and_clear();
+
+            scb.ICSR.modify(.{ .PENDSVSET = 1 });
+            asm volatile ("isb");
+        }
+
         //==============================================================================
         // Local handler mode functions
         //==============================================================================
@@ -556,10 +582,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///   in_task    - The task the command applies to
         ///   in_param   - The parameter to send
         fn send_fifo_command(in_command: FIFOCommand, in_task: ?*RTTS.TaskItem, in_param: ?u32) void {
-            // If we're not using core1 then just return
-
-            if (RTTS.core_mask & 0x02 == 0) return;
-
             // Compute and queue the command word:
             //
             // +---------+---------+---------+---------+

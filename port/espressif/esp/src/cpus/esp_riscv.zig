@@ -50,12 +50,7 @@ pub const Interrupt = enum(u5) {
     interrupt31 = 31,
 };
 
-const riscv_calling_convention: std.builtin.CallingConvention = .{ .riscv32_interrupt = .{ .mode = .machine } };
-
-pub const InterruptHandler = extern union {
-    naked: *const fn () callconv(.naked) noreturn,
-    riscv: *const fn () callconv(riscv_calling_convention) void,
-};
+pub const InterruptHandler = *const fn (*TrapFrame) callconv(.c) void;
 
 pub const InterruptOptions = microzig.utilities.GenerateInterruptOptions(&.{
     .{ .InterruptEnum = enum { Exception }, .HandlerFn = InterruptHandler },
@@ -403,7 +398,6 @@ pub const TrapFrame = extern struct {
 fn _vector_table() align(256) linksection(".trap") callconv(.naked) void {
     comptime {
         // TODO: make a better default exception handler
-
         @export(
             microzig_options.interrupts.Exception orelse &unhandled,
             .{ .name = "_exception_handler" },
