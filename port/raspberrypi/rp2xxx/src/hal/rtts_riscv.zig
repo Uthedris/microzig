@@ -86,7 +86,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             null_task_stack[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
+            // _ = cpu.interrupt.core.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
+            // _ = cpu.interrupt.core.set_handler(.MachineSoftware, .{ .naked = machine_software_ISR });
 
             std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{ debug_core(), RTTS.core_mask });
 
@@ -153,11 +154,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                 _ = multicore.doorbell.read_and_clear();
 
-                cpu.interrupt.set_priority(.SIO_IRQ_BELL, @enumFromInt(1));
-
                 irq.enable(.SIO_IRQ_BELL);
-
                 cpu.interrupt.core.enable(.MachineExternal);
+                cpu.interrupt.core.enable(.MachineSoftware);
 
                 irq.globally_enable();
             }
@@ -402,15 +401,91 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
+        /// Machine_software interrupt service routine
+        ///
+
+        pub fn machine_software_ISR() callconv(.naked) noreturn {
+            asm volatile (
+                \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
+                \\     addi    sp, sp, -64
+                \\     csrr    ra,  MEPC
+                \\     sw      ra,  0(sp)
+                \\     csrr    ra,  MSTATUS
+                \\     sw      ra,  4(sp)
+                \\     sw      gp,  8(sp)
+                \\     sw      tp,  12(sp)
+                \\     sw      t0,  16(sp)
+                \\     sw      t1,  20(sp)
+                \\     sw      t2,  24(sp)
+                \\     sw      t3,  28(sp)
+                \\     sw      t4,  32(sp)
+                \\     sw      t5,  36(sp)
+                \\     sw      t6,  40(sp)
+                \\     sw      a0,  44(sp)
+                \\     sw      a1,  48(sp)
+                \\     sw      a2,  52(sp)
+                \\     sw      a3,  56(sp)
+                \\     sw      a4,  60(sp)
+                \\     sw      a5,  64(sp)
+                \\     sw      a6,  68(sp)
+                \\     sw      a7,  72(sp)
+                \\
+                \\     mv      a0, sp
+                \\     call    %[next]
+                \\     mv      sp, a0
+                \\
+                \\     lw      ra, 0(sp)
+                \\     csrw    MEPC, ra
+                \\     lw      ra, 4(sp)
+                \\     csrw    MSTATUS, ra
+                \\     lw      gp,  8(sp)
+                \\     lw      tp,  12(sp)
+                \\     lw      t0,  16(sp)
+                \\     lw      t1,  20(sp)
+                \\     lw      t2,  24(sp)
+                \\     lw      t3,  28(sp)
+                \\     lw      t4,  32(sp)
+                \\     lw      t5,  36(sp)
+                \\     lw      t6,  40(sp)
+                \\     lw      a0,  44(sp)
+                \\     lw      a1,  48(sp)
+                \\     lw      a2,  52(sp)
+                \\     lw      a3,  56(sp)
+                \\     lw      a4,  60(sp)
+                \\     lw      a5,  64(sp)
+                \\     lw      a6,  68(sp)
+                \\     lw      a7,  72(sp)
+                \\     addi    sp,  sp, 64
+                \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
+                \\     mret
+                :
+                : [next] "i" (next_task),
+            );
+        }
+
+        export fn next_task(sp: [*]usize) callconv(.c) [*]usize {
+            std.log.debug("{s}  ### Software ISR ###", .{ debug_core() });
+
+            return RTTS.find_next_task_sp(sp);
+        }
+
+        //------------------------------------------------------------------------------
         /// Doorbell interrupt service routine
         ///
         ///
         pub fn doorbell_ISR() callconv(.c) void {
-            std.log.debug("{s}  ### Doorbell ISR ###", .{ debug_core() });
-
             _ = multicore.doorbell.read_and_clear();
 
-            // ### TODO ### do a deferred significant_event call
+            cpu.interrupt.core.set_pending(.MachineSoftware);
+
+            std.log.debug("{s}  ### Doorbell ISR ###", .{ debug_core() });
+
+            // It would be great if we could do the task swap here, but we cannot.
+            // The external interrupt dispach has already clobbered a0, so we
+            // set a flag to trigger the software interrupt once interrupts are enabled
+            // again.
+
+            std.log.debug("{s}       is software interrupt pending: {}", .{ debug_core(), cpu.interrupt.core.is_pending(.MachineSoftware) });
         }
 
         //==============================================================================
