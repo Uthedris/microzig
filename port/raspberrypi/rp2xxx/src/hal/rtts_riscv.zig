@@ -21,6 +21,7 @@ pub const SvcID = enum(u8) {
     yield = 0x00,
     significant_event = 0x01,
     wait = 0x02,
+    _,
 };
 
 const FIFOCommand = enum(u8) {
@@ -44,7 +45,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // platform specific functionality.
 
         //------------------------------------------------------------------------------
-        /// Get the ID of the current core
+        /// Get the ID of the current core [0..RTTS.core_count]
         ///
         pub fn core_id() u8 {
             return @intCast(hal.get_cpu_id());
@@ -60,7 +61,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Initialize the stack for a task as though it had been swapped out
         ///
         pub fn initialize_stack(in_stack: [*]usize, in_pc: *const fn () void) [*]usize {
-
             var sp = in_stack - 32;
 
             for (sp[2..32]) |*reg| {
@@ -68,7 +68,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             }
 
             sp[0] = @intFromPtr(in_pc);
-            sp[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
+            sp[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             return sp;
         }
@@ -83,17 +83,20 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 32]);
 
             null_task_stack[0] = @intFromPtr(&null_task_loop);
-            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
+            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             // ### TODO ### uncomment below when we allow these to be set at runtime
             // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
 
-            std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{debug_core(), RTTS.core_mask});
+            std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{ debug_core(), RTTS.core_mask });
 
             // Setup for multiple cores if configured.
 
-            if (RTTS.core_mask & 0x02 != 0) {
-                _ = irq.set_handler(.SIO_IRQ_FIFO, .{ .c = fifo_ISR });
+            if (RTTS.core_count > 1) {
+
+                if (irq.has_ram_vectors()) {
+                    _ = irq.set_handler(.SIO_IRQ_BELL, .{ .c = doorbell_ISR });
+                }
 
                 // Note: We don't enable this interrupt until after the other core is
                 // launched, so we don't mess with the launch sequence. It will be
@@ -144,17 +147,17 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         fn run_first_task() noreturn {
             std.log.debug("{s}Entered run_first_task", .{debug_core()});
 
-            // Enable the FIFO interrupt if we are running on multiple cores.
+            // Enable the doorbell interrupt if we are running on multiple cores.
 
-            if (RTTS.core_mask & 0x02 != 0) {
-                multicore.fifo.drain();
-                SIO.FIFO_ST.raw = 0;
+            if (RTTS.core_count > 1) {
 
-                irq.enable(.SIO_IRQ_FIFO);
+                _ = multicore.doorbell.read_and_clear();
 
-                if (compatibility.arch == .riscv) {
-                    cpu.interrupt.core.enable(cpu.CoreInterrupt.MachineExternal);
-                }
+                cpu.interrupt.set_priority(.SIO_IRQ_BELL, @enumFromInt(1));
+
+                irq.enable(.SIO_IRQ_BELL);
+
+                cpu.interrupt.core.enable(.MachineExternal);
 
                 irq.globally_enable();
             }
@@ -186,17 +189,31 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 }
             }
 
-            asm volatile (
-                \\    mv    sp, %[sp]        // Set the process stack pointer
-                \\    li    t0, 0x00001810   // Set the MSTATUS register
-                \\    csrs  MSTATUS, t0
-                \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
-                \\    mret
-                :
-                : [sp] "r" (target_sp),
-                  [pc] "r" (target_pc),
-                : "t0"
-            );
+            if (config.run_unprivileged) {
+                asm volatile (
+                    \\    mv    sp, %[sp]        // Set the process stack pointer
+                    \\    li    t0, 0x00000080   // Set the MSTATUS register
+                    \\    csrs  MSTATUS, t0
+                    \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
+                    \\    mret
+                    :
+                    : [sp] "r" (target_sp),
+                    [pc] "r" (target_pc),
+                    : "t0"
+                );
+            } else {
+                asm volatile (
+                    \\    mv    sp, %[sp]        // Set the process stack pointer
+                    \\    li    t0, 0x00001880   // Set the MSTATUS register
+                    \\    csrs  MSTATUS, t0
+                    \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
+                    \\    mret
+                    :
+                    : [sp] "r" (target_sp),
+                    [pc] "r" (target_pc),
+                    : "t0"
+                );
+            }
 
             unreachable;
         }
@@ -206,14 +223,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //==============================================================================
         // These ISR's  need to be registered.
         //  1. me_ISR   - (Exception)
-        //  2. fifo_ISR    - (The inter-core communication interrupt service routine
+        //  2. doorbell_ISR    - (The inter-core communication interrupt service routine
 
         //  For time functions?
         //  3. mt_ISR   - (Machine Timer) The sysTick interrupt service routine
         //
         //  For intercore interrupt?
         //  4. ms_ISR   - (Machine Software) The inter-core interrupt service routine
-
 
         //------------------------------------------------------------------------------
         /// Machine_exception interrupt service routine
@@ -326,8 +342,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         /// It does the actual dispatching of the ecall instruction
         ///
-        export fn do_machine_exception(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
-
+        export fn do_machine_exception(in_code: SvcID, sp: [*]usize) callconv(.c) [*]usize {
             var ret_sp: [*]usize = sp;
 
             const cause = cpu.csr.mcause.read().code;
@@ -342,21 +357,31 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 // Dispatch the instruction. This may change the stack pointer.
                 // if a new task is dispatched.
 
+                std.log.debug("{s}  Dispatch: {s}", .{ debug_core(), @tagName(in_code) });
+
                 switch (in_code) {
-                    0 => // yield
+                    .yield =>
                     {
-                        ret_sp = RTTS.find_next_task_sp(sp);
+                        if (RTTS.current_task[core_id()]) |task| {
+                            task.state = .yielded;
+                            ret_sp = RTTS.find_next_task_sp(sp);
+                        }
                     },
-                    1 => // significant_event
+                    .significant_event =>
                     {
                         for (&RTTS.sig_event) |*sig_event| {
                             sig_event.* = true;
                         }
                         ret_sp = RTTS.find_next_task_sp(sp);
 
-                        send_fifo_command(.dispatch, null, null);
+                        // If we are running on multiple cores, we need to signal the other core.
+
+                        if (RTTS.core_count > 1)
+                        {
+                            multicore.doorbell.set(0);
+                        }
                     },
-                    2 => // wait
+                    .wait =>
                     {
                         if (RTTS.current_task[core_id()]) |task| {
                             // We need to wait if we have a mask and no
@@ -377,114 +402,15 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
-        /// FIFO interrupt service routine
+        /// Doorbell interrupt service routine
         ///
-        pub fn fifo_ISR() callconv(.c) void {
-            var theParam: u32 = 0;
-            var theTask: ?*RTTS.TaskItem = null;
-
-            std.log.debug("{s}FIFO ISR   FIFO_ST: 0x{x:08}", .{ debug_core(), SIO.FIFO_ST.raw });
-
-            SIO.FIFO_ST.raw = 0;
-
-            while (multicore.fifo.read()) |first_word| {
-                // The high order eight bits of the first word of
-                // a transfer are always 0x80.
-                if ((first_word & 0xFF000000) != 0x80000000) {
-                    std.log.debug("{s}   bad command 0x{x:08}", .{ debug_core(), first_word });
-                    continue;
-                }
-
-                // And the next eight bits are the size of the transfer.
-                const count = (first_word >> 16) & 0xFF;
-
-                //This will always be either 1, 2, or 3.
-                if (count < 1 or count > 3) {
-                    std.log.debug("{s}   bad command 0x{x:08}  count: {d}", .{ debug_core(), first_word, count });
-                    continue;
-                }
-
-                if (count >= 2) {
-                    theTask = @ptrFromInt(multicore.fifo.read_blocking());
-                }
-
-                if (count == 3) {
-                    theParam = multicore.fifo.read_blocking();
-                }
-
-                const command: FIFOCommand = @enumFromInt(first_word & 0xFF);
-
-                if (theTask) |task| {
-                    std.log.debug("{s}   dispatch: {} {s} {d}", .{ debug_core(), @intFromEnum(command), @tagName(task.tag), theParam });
-                } else {
-                    std.log.debug("{s}   dispatch: {} null {d}", .{ debug_core(), @intFromEnum(command), theParam });
-                }
-
-                switch (command) {
-                    .dispatch => {
-                        // ---------- Trigger a dispatch ---------
-                        // scb.ICSR.modify( .{ .PENDSVSET = 1 });
-                        // asm volatile ( "isb" );
-                    },
-                    .block => {},
-                    else => {
-                        std.log.debug("Unknown command: 0x{x:08}", .{@intFromEnum(command)});
-                    },
-                }
-            }
-
-            std.log.debug("{s}   done", .{debug_core()});
-        }
-
-        //==============================================================================
-        // Local handler mode functions
-        //==============================================================================
-        // These functions are for use with the scheduler mutex locked
-        // and must not be called from user mode.
-
-        //------------------------------------------------------------------------------
-        /// Send a command to the other core
-        /// Parameters:
-        ///   in_command - The command to send
-        ///   in_task    - The task the command applies to
-        ///   in_param   - The parameter to send
         ///
-        fn send_fifo_command(in_command: FIFOCommand, in_task: ?*RTTS.TaskItem, in_param: ?u32) void {
-            // If we're not using core1 then just return
+        pub fn doorbell_ISR() callconv(.c) void {
+            std.log.debug("{s}  ### Doorbell ISR ###", .{ debug_core() });
 
-            if (RTTS.core_mask & 0x02 == 0) return;
+            _ = multicore.doorbell.read_and_clear();
 
-            // Compute and queue the command word:
-            //
-            // +---------+---------+---------+---------+
-            // |  0x80   | msg len |  command number   |
-            // +---------+---------+---------+---------+
-
-            var msg_len: usize = 1;
-
-            if (in_task != null) msg_len += 1;
-            if (in_param != null) msg_len += 1;
-
-            const command = 0x80000000 | (msg_len << 16) | @intFromEnum(in_command);
-
-            // If the send fifo is full then we have to  wait until the
-            // other core reads something off of the fifo so we can
-            // send some data.
-
-            // If the send fifo is full then ping the other core
-            // so that it reads something off of the fifo.
-
-            if (!multicore.fifo.is_write_ready()) cpu.sev();
-
-            multicore.fifo.write_blocking(command);
-
-            if (in_task) |task| {
-                multicore.fifo.write_blocking(@intFromPtr(task));
-            }
-
-            if (in_param) |param| {
-                multicore.fifo.write_blocking(param);
-            }
+            // ### TODO ### do a deferred significant_event call
         }
 
         //==============================================================================

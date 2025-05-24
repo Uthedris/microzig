@@ -58,6 +58,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         pub const TaskState = enum {
             running,
             runnable,
+            yielded,
             waiting,
         };
 
@@ -224,7 +225,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             const the_task = get_current_task();
 
             the_task.event_mask = in_event_mask;
-            if (in_clear_flags) the_task.event_flags = 0;
+            if (in_clear_flags) the_task.event_flags &= ~in_event_mask;
 
             if ((the_task.event_flags & the_task.event_mask) == 0) {
                 platform.wait(); // Wait for an event
@@ -232,14 +233,21 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         }
 
         //----------------------------------------------------------------------------
-        /// Yield to a lower priority task.  The current task will not be run again
-        /// until after the next significant event.
+        /// Yield to a lower priority task.
+        ///
+        /// The current task will let other tasks of lower priority run.  It will
+        /// run again after the next significant event or if no other tasks want
+        /// to run.
         pub fn yield() void {
+            const the_task = get_current_task();
+            the_task.state = .yielded;
+
             platform.yield();
         }
 
         //----------------------------------------------------------------------------
         /// Declare a significant event.
+        ///
         /// The scheduler will re-scan the task list and the highest priority
         /// runnable tasks will be run.  A call to this function on one core can
         /// change the tasks assigned to any core.
@@ -251,8 +259,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// Signal an event to the indicated task.
         ///
         /// This function will set the specified event flag for the task, and, if the
-        /// task was waiting on that event flag, it will be marked as runnable and a
-        /// significant event will be declared.
+        /// task was waiting on that event flag, the task will be marked as runnable
+        /// and a significant event will be declared.
         ///
         /// Parameters:
         ///   in_task  - The index of the task to signal
@@ -263,7 +271,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             var need_significant_event = false;
             const the_task = &task_list[@intFromEnum(in_task)];
 
-            std.log.debug("{s}  Signaling event {d} to task {s}", .{ platform.debug_core(), in_event, @tagName(in_task) });
+            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
 
             {
                 schedule_mutex.lock();
@@ -279,11 +287,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 }
             }
 
-            if (need_significant_event) {
-                std.log.debug("{s}  Signaling significant event", .{platform.debug_core()});
-
-                platform.significant_event();
-            }
+            if (need_significant_event) platform.significant_event();
         }
 
         //----------------------------------------------------------------------------
@@ -310,13 +314,22 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         }
 
         //----------------------------------------------------------------------------
-        /// Set the priority of a task to be just _below_ the priority of another task.
+        /// Set the priority of a task to be just _above_ the priority of another task.
         ///
         /// Parameters:
-        ///   in_task_a - The task to set the priority of
-        ///   in_task_b - Where to place the task.  If null, the task will be placed at the top of the priority list.
+        ///   in_task_a - The task whose priority we want to set.
+        ///   in_task_b - The task to place in_task_a above.  If null, the task
+        ///               will be placed at the bottom of the priority list.
         ///
         pub fn set_priority(in_task_a: TaskTag, in_task_b: ?TaskTag) void {
+            defer significant_event();
+
+            // Sanity check -- we do nothing if task_a and task_b are the same
+
+            if (in_task_b) |t| {
+                if (t == in_task_a) return;
+            }
+
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
 
@@ -324,25 +337,45 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
             // Unlink task_a from priority list
 
-            for (task_list) |*an_item| {
-                if (an_item.next == task_a) {
-                    an_item.next = task_a.next;
-                    break;
+            if (highest_priority_task == task_a) {
+                highest_priority_task = task_a.next.?;
+            } else {
+                for (&task_list) |*an_item| {
+                    if (an_item.next) |next| {
+                        if (next == task_a) {
+                            an_item.next = task_a.next;
+                            break;
+                        }
+                    }
                 }
             }
 
-            if (in_task_b) |b| {
-                const task_b = &task_list[@intFromEnum(b)];
+            if (in_task_b) |t| {
+                // Link task_a into priority list before task_b
+                const task_b = &task_list[@intFromEnum(t)];
 
-                // Link a back into priority list
-                task_a.next = task_b.next;
-                task_b.next = task_a;
+                for (&task_list) |*an_item| {
+                    if (an_item.next) |next| {
+                        if (next == task_b) {
+                            an_item.next = task_a;
+                            task_a.next = task_b;
+                            break;
+                        }
+                    }
+                }
             } else {
-                task_a.next = highest_priority_task;
-                highest_priority_task = task_a;
-            }
+                // Link task_a into priority list at end
 
-            platform.significant_event();
+                for (&task_list) |*an_item| {
+                    if (an_item.next == null) {
+                        an_item.next = task_a;
+                        task_a.next = null;
+                        break;
+                    }
+                }
+
+                task_a.next = null;
+            }
         }
 
         //============================================================================
@@ -377,8 +410,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         pub fn find_next_task_sp(in_sp: [*]usize) [*]usize {
             std.log.debug("{s}  Finding next task", .{platform.debug_core()});
 
-            var a_task: ?*TaskItem = null;
-
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
 
@@ -390,39 +421,51 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 if (task.state == .running) task.state = .runnable;
             }
 
-            // Figure out where to start our scan
+            var has_significant_event = sig_event[platform.core_id()];
+            sig_event[platform.core_id()] = false;
 
-            if (sig_event[platform.core_id()]) {
-                // With significant event, start at the top of the priority list.
-                sig_event[platform.core_id()] = false;
-                a_task = highest_priority_task;
-            } else if (find_lowest_priority_running()) |task| {
-                // With no significant event, start after the lowest priority task that is running.
-                a_task = task.next;
-            } else {
-                std.log.debug("{s}  Null already running  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(platform.null_task_stack_pointer) });
-                current_task[platform.core_id()] = null;
-                return platform.null_task_stack_pointer;
-            }
+            // Scan the task list for the highest priority runnable task
 
-            // Look for a runnable task
+            while (true) {
+                if (has_significant_event) clear_yield_flags();
 
-            while (a_task) |task| {
-                if (task.state == .runnable) {
-                    std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
+                var a_task: ?*TaskItem = highest_priority_task;
+                while (a_task) |task| {
+                    if (task.state == .runnable) {
+                        std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
 
-                    task.state = .running;
-                    current_task[platform.core_id()] = task;
-                    return task.stack_pointer;
+                        task.state = .running;
+                        current_task[platform.core_id()] = task;
+                        return task.stack_pointer;
+                    }
+
+                    a_task = task.next;
                 }
 
-                a_task = task.next;
+                // If we get here we didn't find a runnable task, one of two things happened:
+                // 1. We had a significant event - since nothing wants to run we run the null task.
+                // 2. We didn't have a significant event - scan again as if we did to check for yielded tasks.
+
+                if (has_significant_event) break;
+
+                has_significant_event = true;
             }
 
             std.log.debug("{s}  Switch to null task  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(platform.null_task_stack_pointer) });
 
             current_task[platform.core_id()] = null;
             return platform.null_task_stack_pointer;
+        }
+
+        //----------------------------------------------------------------------------
+        /// Clear any yield flags making the yielded tasks runnable.
+        ///
+        pub fn clear_yield_flags() void {
+            for (&task_list) |*an_item| {
+                if (an_item.state == .yielded) {
+                    an_item.state = .runnable;
+                }
+            }
         }
 
         //----------------------------------------------------------------------------
