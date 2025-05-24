@@ -94,15 +94,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             // Setup for multiple cores if configured.
 
             if (RTTS.core_count > 1) {
-
-                if (irq.has_ram_vectors()) {
-                    _ = irq.set_handler(.SIO_IRQ_BELL, .{ .c = doorbell_ISR });
-                }
-
-                // Note: We don't enable this interrupt until after the other core is
-                // launched, so we don't mess with the launch sequence. It will be
-                // enabled in run_first_task.
-
                 multicore.launch_core1(run_first_task);
             }
 
@@ -148,17 +139,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         fn run_first_task() noreturn {
             std.log.debug("{s}Entered run_first_task", .{debug_core()});
 
-            // Enable the doorbell interrupt if we are running on multiple cores.
-
             if (RTTS.core_count > 1) {
-
-                _ = multicore.doorbell.read_and_clear();
-
-                irq.enable(.SIO_IRQ_BELL);
-                cpu.interrupt.core.enable(.MachineExternal);
-                cpu.interrupt.core.enable(.MachineSoftware);
-
                 irq.globally_enable();
+                cpu.interrupt.core.enable(.MachineSoftware);
             }
 
             // Find the highest priority task.  If launched on multiple
@@ -177,7 +160,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                         a_task.state = .running;
 
                         // We found the task we want to run.  Get the initial PC from
-                        // the initalized stack then clear the stack.
+                        // the initialized stack then clear the stack.
 
                         target_pc = a_task.stack_pointer[0];
                         target_sp = a_task.stack_pointer + 32;
@@ -222,7 +205,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //==============================================================================
         // These ISR's  need to be registered.
         //  1. me_ISR   - (Exception)
-        //  2. doorbell_ISR    - (The inter-core communication interrupt service routine
+        //  2. ms_ISR   - (Machine Software) The inter-core interrupt service routine
 
         //  For time functions?
         //  3. mt_ISR   - (Machine Timer) The sysTick interrupt service routine
@@ -377,7 +360,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         if (RTTS.core_count > 1)
                         {
-                            multicore.doorbell.set(0);
+                            // Set the softirq for the other core
+                            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
                         }
                     },
                     .wait =>
@@ -463,29 +447,15 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             );
         }
 
+        /// This function is called from the machine_software_ISR.
         export fn next_task(sp: [*]usize) callconv(.c) [*]usize {
             std.log.debug("{s}  ### Software ISR ###", .{ debug_core() });
 
+            // Clear the softirq for this core
+            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x100 else 0x200);
+
+
             return RTTS.find_next_task_sp(sp);
-        }
-
-        //------------------------------------------------------------------------------
-        /// Doorbell interrupt service routine
-        ///
-        ///
-        pub fn doorbell_ISR() callconv(.c) void {
-            _ = multicore.doorbell.read_and_clear();
-
-            cpu.interrupt.core.set_pending(.MachineSoftware);
-
-            std.log.debug("{s}  ### Doorbell ISR ###", .{ debug_core() });
-
-            // It would be great if we could do the task swap here, but we cannot.
-            // The external interrupt dispach has already clobbered a0, so we
-            // set a flag to trigger the software interrupt once interrupts are enabled
-            // again.
-
-            std.log.debug("{s}       is software interrupt pending: {}", .{ debug_core(), cpu.interrupt.core.is_pending(.MachineSoftware) });
         }
 
         //==============================================================================
