@@ -1,3 +1,14 @@
+//! This is the platform specific code for the RTTS scheduler for the
+//! RP2350 dual core risc-v processor.
+//!
+//! To use dual processor mode, RTTS must be started on core 0.
+//!
+//! System resources used:
+//!   - Exception handler (Machine Exception) for `ecall` instruction dispatch.
+//!   - Machine Software interrupt for inter-core communication (when configured for both cores).
+
+// ### TODO ###  Test calling "significant_event()" and "signal_event()" from an interrupt handler.
+
 const std = @import("std");
 const microzig = @import("microzig");
 
@@ -228,37 +239,37 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //
         //      +------------+
         //      |  MEPC      | <- Stack pointer
-        //      |  MSTATUS   | +   1
-        //      |  gp        | +   2
-        //      |  tp        | +   3
-        //      |  t0        | +   4
-        //      |  t1        | +   5
-        //      |  t2        | +   6
-        //      |  t3        | +   7
-        //      |  t4        | +   8
-        //      |  t5        | +   9
-        //      |  t6        | +  10
-        //      |  a0        | +  11
-        //      |  a1        | +  12
-        //      |  a2        | +  13
-        //      |  a3        | +  14
-        //      |  a4        | +  15
-        //      |  a5        | +  16
-        //      |  a6        | +  17
-        //      |  a7        | +  18
-        //      |  s11       | +  19
-        //      |  s10       | +  20
-        //      |  s9        | +  21
-        //      |  s8        | +  22
-        //      |  s7        | +  23
-        //      |  s6        | +  24
-        //      |  s5        | +  25
-        //      |  s4        | +  26
-        //      |  s3        | +  27
-        //      |  s2        | +  28
-        //      |  s1        | +  29
-        //      |  s0        | +  30
-        //      |  ra        | +  31
+        //      |  MSTATUS   | +    4  ( 1)
+        //      |  gp        | +    8  ( 2)
+        //      |  tp        | +   12  ( 3)
+        //      |  t6        | +   16  ( 4)
+        //      |  t5        | +   20  ( 5)
+        //      |  t4        | +   24  ( 6)
+        //      |  t3        | +   28  ( 7)
+        //      |  t2        | +   32  ( 8)
+        //      |  t1        | +   36  ( 9)
+        //      |  t0        | +   40  (10)
+        //      |  a7        | +   44  (11)
+        //      |  a6        | +   48  (12)
+        //      |  a5        | +   52  (13)
+        //      |  a4        | +   56  (14)
+        //      |  a3        | +   60  (15)
+        //      |  a2        | +   64  (16)
+        //      |  a1        | +   68  (17)
+        //      |  a0        | +   72  (18)
+        //      |  s11       | +   76  (19)
+        //      |  s10       | +   80  (20)
+        //      |  s9        | +   84  (21)
+        //      |  s8        | +   88  (22)
+        //      |  s7        | +   92  (23)
+        //      |  s6        | +   96  (24)
+        //      |  s5        | +  100  (25)
+        //      |  s4        | +  104  (26)
+        //      |  s3        | +  108  (27)
+        //      |  s2        | +  112  (28)
+        //      |  s1        | +  116  (29)
+        //      |  s0        | +  120  (30)
+        //      |  ra        | +  124  (31)
         //      +------------+
 
         pub fn machine_exception_ISR() callconv(.naked) noreturn {
@@ -271,21 +282,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\     sw      ra,  4(sp)
                 \\     sw      gp,  8(sp)
                 \\     sw      tp,  12(sp)
-                \\     sw      t0,  16(sp)
-                \\     sw      t1,  20(sp)
-                \\     sw      t2,  24(sp)
+                \\     sw      t6,  16(sp)
+                \\     sw      t5,  20(sp)
+                \\     sw      t4,  24(sp)
                 \\     sw      t3,  28(sp)
-                \\     sw      t4,  32(sp)
-                \\     sw      t5,  36(sp)
-                \\     sw      t6,  40(sp)
-                \\     sw      a0,  44(sp)
-                \\     sw      a1,  48(sp)
-                \\     sw      a2,  52(sp)
-                \\     sw      a3,  56(sp)
-                \\     sw      a4,  60(sp)
-                \\     sw      a5,  64(sp)
-                \\     sw      a6,  68(sp)
-                \\     sw      a7,  72(sp)
+                \\     sw      t2,  32(sp)
+                \\     sw      t1,  36(sp)
+                \\     sw      t0,  40(sp)
+                \\     sw      a7,  44(sp)
+                \\     sw      a6,  48(sp)
+                \\     sw      a5,  52(sp)
+                \\     sw      a4,  56(sp)
+                \\     sw      a3,  60(sp)
+                \\     sw      a2,  64(sp)
+                \\     sw      a1,  68(sp)
+                \\     sw      a0,  72(sp)
                 \\
                 \\     mv      a1, sp
                 \\     call    %[meh]
@@ -297,21 +308,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\     csrw    MSTATUS, ra
                 \\     lw      gp,  8(sp)
                 \\     lw      tp,  12(sp)
-                \\     lw      t0,  16(sp)
-                \\     lw      t1,  20(sp)
-                \\     lw      t2,  24(sp)
+                \\     lw      t6,  16(sp)
+                \\     lw      t5,  20(sp)
+                \\     lw      t4,  24(sp)
                 \\     lw      t3,  28(sp)
-                \\     lw      t4,  32(sp)
-                \\     lw      t5,  36(sp)
-                \\     lw      t6,  40(sp)
-                \\     lw      a0,  44(sp)
-                \\     lw      a1,  48(sp)
-                \\     lw      a2,  52(sp)
-                \\     lw      a3,  56(sp)
-                \\     lw      a4,  60(sp)
-                \\     lw      a5,  64(sp)
-                \\     lw      a6,  68(sp)
-                \\     lw      a7,  72(sp)
+                \\     lw      t2,  32(sp)
+                \\     lw      t1,  36(sp)
+                \\     lw      t0,  40(sp)
+                \\     lw      a7,  44(sp)
+                \\     lw      a6,  48(sp)
+                \\     lw      a5,  52(sp)
+                \\     lw      a4,  56(sp)
+                \\     lw      a3,  60(sp)
+                \\     lw      a2,  64(sp)
+                \\     lw      a1,  68(sp)
+                \\     lw      a0,  72(sp)
                 \\     addi    sp,  sp, 64
                 \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
                 \\     mret

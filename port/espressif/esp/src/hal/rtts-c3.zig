@@ -1,3 +1,12 @@
+//! This is the platform specific code for the RTTS scheduler for a single
+//! core risc-v processor.
+//!
+//! System resources used:
+//!   - Exception handler (Machine Exception) for `ecall` instruction dispatch.
+//!
+//!
+// ### TODO ###  Test calling "significant_event()" and "signal_event()" from an interrupt handler.
+
 const std = @import("std");
 const microzig = @import("microzig");
 
@@ -23,14 +32,6 @@ pub const SvcID = enum(u8) {
     wait = 0x02,
 };
 
-const FIFOCommand = enum(u8) {
-    dispatch,
-    block,
-    _,
-};
-
-const riscv_calling_convention: std.builtin.CallingConvention = .{ .riscv32_interrupt = .{ .mode = .machine } };
-
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
     return struct {
         const Platform = @This();
@@ -44,10 +45,10 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // platform specific functionality.
 
         //------------------------------------------------------------------------------
-        /// Get the ID of the current core.  We only have one so it is always 1
+        /// Get the ID of the current core.  We only have one so the id is always 0.
         ///
         pub fn core_id() u8 {
-            return 1;
+            return 0;
         }
 
         //------------------------------------------------------------------------------
@@ -68,7 +69,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             }
 
             sp[0] = @intFromPtr(in_pc);
-            sp[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
+            sp[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             return sp;
         }
@@ -78,17 +79,15 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn start_cores() noreturn {
 
-            // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = irq.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
-
-            std.log.debug("Entered start_cores  core_mask: 0x{x:02}", .{RTTS.core_mask});
-
             // Set up null task stack
 
             null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 32]);
 
             null_task_stack[0] = @intFromPtr(&null_task_loop);
-            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0010 else 0x0000_1810;
+            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
+
+            // ### TODO ### uncomment below when we allow these to be set at runtime
+            // _ = cpu.interrupt.core.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
 
             run_first_task();
         }
@@ -124,6 +123,72 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //==============================================================================
+        // Local thread mode functions
+        //==============================================================================
+
+        //------------------------------------------------------------------------------
+        /// Run the first task on this core
+        fn run_first_task() noreturn {
+            std.log.debug("{s}Entered run_first_task", .{debug_core()});
+
+            // Find the highest priority task.  If launched on multiple
+            // cores, each will pick a different task.
+
+            var target_sp: [*]usize = &null_task_stack;
+            var target_pc: usize = @intFromPtr(&null_task_loop);
+
+            {
+                RTTS.schedule_mutex.lock();
+                defer RTTS.schedule_mutex.unlock();
+
+                for (&RTTS.task_list) |*a_task| {
+                    if (a_task.state == .runnable) {
+                        RTTS.current_task[core_id()] = a_task;
+                        a_task.state = .running;
+
+                        // We found the task we want to run.  Get the initial PC from
+                        // the initialized stack then clear the stack.
+
+                        target_pc = a_task.stack_pointer[0];
+                        target_sp = a_task.stack_pointer + 32;
+
+                        std.log.debug("Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
+                        break;
+                    }
+                }
+            }
+
+            if (config.run_unprivileged) {
+                asm volatile (
+                    \\    mv    sp, %[sp]        // Set the process stack pointer
+                    \\    li    t0, 0x00000080   // Set the MSTATUS register
+                    \\    csrs  MSTATUS, t0
+                    \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
+                    \\    mret
+                    :
+                    : [sp] "r" (target_sp),
+                    [pc] "r" (target_pc),
+                    : "t0"
+                );
+            } else {
+                asm volatile (
+                    \\    mv    sp, %[sp]        // Set the process stack pointer
+                    \\    li    t0, 0x00001880   // Set the MSTATUS register
+                    \\    csrs  MSTATUS, t0
+                    \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
+                    \\    mret
+                    :
+                    : [sp] "r" (target_sp),
+                    [pc] "r" (target_pc),
+                    : "t0"
+                );
+            }
+
+            unreachable;
+        }
+
+
+        //==============================================================================
         // Interrupt service routines
         //==============================================================================
         // These ISR's  need to be registered.
@@ -142,94 +207,119 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // The riscv does not push anything when a trap happens.  After the save
         // the stack (pointed to by sp) looks like this:
         //
-        //      +------------+
+       //      +------------+
         //      |  MEPC      | <- Stack pointer
-        //      |  MSTATUS   | +   1
-        //      |  gp        | +   2
-        //      |  tp        | +   3
-        //      |  t0        | +   4
-        //      |  t1        | +   5
-        //      |  t2        | +   6
-        //      |  t3        | +   7
-        //      |  t4        | +   8
-        //      |  t5        | +   9
-        //      |  t6        | +  10
-        //      |  a0        | +  11
-        //      |  a1        | +  12
-        //      |  a2        | +  13
-        //      |  a3        | +  14
-        //      |  a4        | +  15
-        //      |  a5        | +  16
-        //      |  a6        | +  17
-        //      |  a7        | +  18
-        //      |  s11       | +  19
-        //      |  s10       | +  20
-        //      |  s9        | +  21
-        //      |  s8        | +  22
-        //      |  s7        | +  23
-        //      |  s6        | +  24
-        //      |  s5        | +  25
-        //      |  s4        | +  26
-        //      |  s3        | +  27
-        //      |  s2        | +  28
-        //      |  s1        | +  29
-        //      |  s0        | +  30
-        //      |  ra        | +  31
+        //      |  MSTATUS   | +    4  ( 1)
+        //      |  gp        | +    8  ( 2)
+        //      |  tp        | +   12  ( 3)
+        //      |  t6        | +   16  ( 4)
+        //      |  t5        | +   20  ( 5)
+        //      |  t4        | +   24  ( 6)
+        //      |  t3        | +   28  ( 7)
+        //      |  t2        | +   32  ( 8)
+        //      |  t1        | +   36  ( 9)
+        //      |  t0        | +   40  (10)
+        //      |  a7        | +   44  (11)
+        //      |  a6        | +   48  (12)
+        //      |  a5        | +   52  (13)
+        //      |  a4        | +   56  (14)
+        //      |  a3        | +   60  (15)
+        //      |  a2        | +   64  (16)
+        //      |  a1        | +   68  (17)
+        //      |  a0        | +   72  (18)
+        //      |  s11       | +   76  (19)
+        //      |  s10       | +   80  (20)
+        //      |  s9        | +   84  (21)
+        //      |  s8        | +   88  (22)
+        //      |  s7        | +   92  (23)
+        //      |  s6        | +   96  (24)
+        //      |  s5        | +  100  (25)
+        //      |  s4        | +  104  (26)
+        //      |  s3        | +  108  (27)
+        //      |  s2        | +  112  (28)
+        //      |  s1        | +  116  (29)
+        //      |  s0        | +  120  (30)
+        //      |  ra        | +  124  (31)
         //      +------------+
+
 
         pub fn machine_exception_ISR() callconv(.naked) noreturn {
             asm volatile (
-                \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
-                \\     addi    sp, sp, -64
-                \\     csrr    ra,  MEPC
-                \\     sw      ra,  0(sp)
+                \\     addi    sp, sp, -128
+                \\     sw      ra,  124(sp)
+                \\     sw      s0,  120(sp)
+                \\     sw      s1,  116(sp)
+                \\     sw      s2,  112(sp)
+                \\     sw      s3,  108(sp)
+                \\     sw      s4,  104(sp)
+                \\     sw      s5,  100(sp)
+                \\     sw      s6,  96(sp)
+                \\     sw      s7,  92(sp)
+                \\     sw      s8,  88(sp)
+                \\     sw      s9,  84(sp)
+                \\     sw      s10, 80(sp)
+                \\     sw      s11, 76(sp)
+                \\     sw      a0,  72(sp)
+                \\     sw      a1,  68(sp)
+                \\     sw      a2,  64(sp)
+                \\     sw      a3,  60(sp)
+                \\     sw      a4,  56(sp)
+                \\     sw      a5,  52(sp)
+                \\     sw      a6,  48(sp)
+                \\     sw      a7,  44(sp)
+                \\     sw      t0,  40(sp)
+                \\     sw      t1,  36(sp)
+                \\     sw      t2,  32(sp)
+                \\     sw      t3,  28(sp)
+                \\     sw      t4,  24(sp)
+                \\     sw      t5,  20(sp)
+                \\     sw      t6,  16(sp)
+                \\     sw      tp,  12(sp)
+                \\     sw      gp,  8(sp)
                 \\     csrr    ra,  MSTATUS
                 \\     sw      ra,  4(sp)
-                \\     sw      gp,  8(sp)
-                \\     sw      tp,  12(sp)
-                \\     sw      t0,  16(sp)
-                \\     sw      t1,  20(sp)
-                \\     sw      t2,  24(sp)
-                \\     sw      t3,  28(sp)
-                \\     sw      t4,  32(sp)
-                \\     sw      t5,  36(sp)
-                \\     sw      t6,  40(sp)
-                \\     sw      a0,  44(sp)
-                \\     sw      a1,  48(sp)
-                \\     sw      a2,  52(sp)
-                \\     sw      a3,  56(sp)
-                \\     sw      a4,  60(sp)
-                \\     sw      a5,  64(sp)
-                \\     sw      a6,  68(sp)
-                \\     sw      a7,  72(sp)
+                \\     csrr    ra,  MEPC
+                \\     sw      ra,  0(sp)
                 \\
                 \\     mv      a1, sp
                 \\     call    %[meh]
-                \\
                 \\     mv      sp, a0
+                \\
                 \\     lw      ra, 0(sp)
                 \\     csrw    MEPC, ra
                 \\     lw      ra, 4(sp)
                 \\     csrw    MSTATUS, ra
                 \\     lw      gp,  8(sp)
                 \\     lw      tp,  12(sp)
-                \\     lw      t0,  16(sp)
-                \\     lw      t1,  20(sp)
-                \\     lw      t2,  24(sp)
+                \\     lw      t6,  16(sp)
+                \\     lw      t5,  20(sp)
+                \\     lw      t4,  24(sp)
                 \\     lw      t3,  28(sp)
-                \\     lw      t4,  32(sp)
-                \\     lw      t5,  36(sp)
-                \\     lw      t6,  40(sp)
-                \\     lw      a0,  44(sp)
-                \\     lw      a1,  48(sp)
-                \\     lw      a2,  52(sp)
-                \\     lw      a3,  56(sp)
-                \\     lw      a4,  60(sp)
-                \\     lw      a5,  64(sp)
-                \\     lw      a6,  68(sp)
-                \\     lw      a7,  72(sp)
-                \\     addi    sp,  sp, 64
-                \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
+                \\     lw      t2,  32(sp)
+                \\     lw      t1,  36(sp)
+                \\     lw      t0,  40(sp)
+                \\     lw      a7,  44(sp)
+                \\     lw      a6,  48(sp)
+                \\     lw      a5,  52(sp)
+                \\     lw      a4,  56(sp)
+                \\     lw      a3,  60(sp)
+                \\     lw      a2,  64(sp)
+                \\     lw      a1,  68(sp)
+                \\     lw      a0,  72(sp)
+                \\     lw      s11, 76(sp)
+                \\     lw      s10, 80(sp)
+                \\     lw      s9,  84(sp)
+                \\     lw      s8,  88(sp)
+                \\     lw      s7,  92(sp)
+                \\     lw      s6,  96(sp)
+                \\     lw      s5,  100(sp)
+                \\     lw      s4,  104(sp)
+                \\     lw      s3,  108(sp)
+                \\     lw      s2,  112(sp)
+                \\     lw      s1,  116(sp)
+                \\     lw      s0,  120(sp)
+                \\     lw      ra,  124(sp)
+                \\     addi    sp,  sp, 128
                 \\     mret
                 :
                 : [meh] "i" (do_machine_exception),
@@ -258,7 +348,10 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 switch (in_code) {
                     0 => // yield
                     {
-                        ret_sp = RTTS.find_next_task_sp(sp);
+                        if (RTTS.current_task[0]) |task| {
+                            task.state = .yielded;
+                            ret_sp = RTTS.find_next_task_sp(sp);
+                        }
                     },
                     1 => // significant_event
                     {
@@ -269,7 +362,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                     },
                     2 => // wait
                     {
-                        if (RTTS.current_task[core_id()]) |task| {
+                        if (RTTS.current_task[0]) |task| {
                             // We need to wait if we have a mask and no
                             // mask bit has a corresponding event flag set.
                             if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
@@ -285,56 +378,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             }
 
             return ret_sp;
-        }
-
-        //==============================================================================
-        // Local thread mode functions
-        //==============================================================================
-
-        //------------------------------------------------------------------------------
-        /// Run the first task on this core
-        fn run_first_task() noreturn {
-            std.log.debug("Entered run_first_task", .{});
-
-            // Switch to the highest priority task
-
-            var target_sp: [*]usize = &null_task_stack;
-            var target_pc: usize = @intFromPtr(&null_task_loop);
-
-            {
-                RTTS.schedule_mutex.lock();
-                defer RTTS.schedule_mutex.unlock();
-
-                for (&RTTS.task_list) |*a_task| {
-                    if (a_task.state == .runnable) {
-                        RTTS.current_task[core_id()] = a_task;
-                        a_task.state = .running;
-
-                        // We found the task we want to run.  Get the initial PC from
-                        // the initalized stack then clear the stack.
-
-                        target_pc = a_task.stack_pointer[0];
-                        target_sp = a_task.stack_pointer + 32;
-
-                        std.log.debug("   Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
-                        break;
-                    }
-                }
-            }
-
-            asm volatile (
-                \\    mv    sp, %[sp]        // Set the process stack pointer
-                \\    li    t0, 0x00001810   // Set the MSTATUS register
-                \\    csrs  MSTATUS, t0
-                \\    csrs  MEPC, %[pc]      // Set the MEPC register to the target PC
-                \\    mret
-                :
-                : [sp] "r" (target_sp),
-                  [pc] "r" (target_pc),
-                : "t0"
-            );
-
-            unreachable;
         }
 
         //==============================================================================
