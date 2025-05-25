@@ -1,3 +1,17 @@
+//! This is the platform specific code for the RTTS scheduler for the
+//! RP2xxx dual core ARM processors.
+//!
+//! //! To use dual processor mode, RTTS must be started on core 0.
+//!
+//! System resources used (all processor types)
+//!   - SVC handler for SVC instruction dispatch.
+//!
+//! System resources used (RP2040)
+//!   - Inter-core FIFO and associated interrupts (when configured for both cores).
+//!
+//! System resources used (RP2350)
+//!   - Inter-core doorbell and associated interrupts (when configured for both cores).
+//!
 const std = @import("std");
 const microzig = @import("microzig");
 
@@ -30,7 +44,6 @@ const FIFOCommand = enum(u8) {
 };
 
 // ### TODO ###  Support running tasks in unprivileged mode
-// ### TODO ###  Improve SVC calling to avoid extra pendSV
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
     _ = config;
@@ -388,6 +401,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                     }
 
                     if (in_handler_mode) {
+                        // we cannot switch task directly as we've lost track of the
+                        // task's context.  Set pendsv to switch the task after the
+                        // handler returns.
                         scb.ICSR.modify(.{ .PENDSVSET = 1 });
                         asm volatile ("isb");
                     } else {
@@ -619,7 +635,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // Null Task
         //==============================================================================
 
-        // ### TODO ###  Why can't this get by with just 16 words?
         const null_task_stack_len = 24;
 
         var null_task_stack: [null_task_stack_len]usize = undefined;

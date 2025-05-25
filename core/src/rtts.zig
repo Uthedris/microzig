@@ -1,9 +1,11 @@
+//! This is the common code for the realtime task scheduler.
+
 const std = @import("std");
 
-pub const hal = @import("hal");
-pub const interrupt = @import("interrupt.zig");
+pub const microzig_config = @import("config");
+pub const hal = if (microzig_config.has_hal) @import("hal") else void;
 
-const time = hal.time;
+pub const interrupt = @import("interrupt.zig");
 
 //============================================================================
 // Configuration
@@ -19,6 +21,9 @@ pub const Config = struct {
 
     /// run tasks in unprivileged mode
     run_unprivileged: bool = false,
+
+    /// Platform specific code override.
+    platform: ?type = null,
 };
 
 /// A structure containing the task configuration data.
@@ -49,7 +54,12 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
         pub const Configuration = Config;
 
-        pub const platform = hal.rtts.configure(Sched, config);
+        pub const platform = if (config.platform) |p|
+            p
+        else if (@hasDecl(hal, "rtts"))
+            hal.rtts.configure(Sched, config)
+        else
+            @compileError("No platform specific functions found");
 
         //============================================================================
         // Type Definitions
