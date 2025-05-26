@@ -30,6 +30,7 @@ pub const SvcID = enum(u8) {
     yield = 0x00,
     significant_event = 0x01,
     wait = 0x02,
+    _,
 };
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
@@ -281,7 +282,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\     csrr    ra,  MEPC
                 \\     sw      ra,  0(sp)
                 \\
-                \\     mv      a1, sp
+                \\     mv      a1, sp   // a0 already has the ecall code.
                 \\     call    %[meh]
                 \\     mv      sp, a0
                 \\
@@ -330,7 +331,10 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         /// It does the actual dispatching of the ecall instruction
         ///
-        export fn do_machine_exception(in_code: u32, sp: [*]usize) callconv(.c) [*]usize {
+        export fn do_machine_exception(in_code: SvcID, sp: [*]usize) callconv(.c) [*]usize {
+
+            std.log.debug("MEH: in_code: 0x{x:02} sp: 0x{x:08}", .{ @intFromEnum(in_code), @intFromPtr(sp) });
+
             var ret_sp: [*]usize = sp;
 
             const cause = cpu.csr.mcause.read().code;
@@ -346,22 +350,25 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 // if a new task is dispatched.
 
                 switch (in_code) {
-                    0 => // yield
+                    .yield =>
                     {
+                        std.log.debug("MEH: yield", .{});
                         if (RTTS.current_task[0]) |task| {
                             task.state = .yielded;
                             ret_sp = RTTS.find_next_task_sp(sp);
                         }
                     },
-                    1 => // significant_event
+                    .significant_event =>
                     {
+                        std.log.debug("MEH: significant_event", .{});
                         for (&RTTS.sig_event) |*sig_event| {
                             sig_event.* = true;
                         }
                         ret_sp = RTTS.find_next_task_sp(sp);
                     },
-                    2 => // wait
+                    .wait =>
                     {
+                        std.log.debug("MEH: wait", .{});
                         if (RTTS.current_task[0]) |task| {
                             // We need to wait if we have a mask and no
                             // mask bit has a corresponding event flag set.
@@ -372,7 +379,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                         }
                     },
                     else => {
-                        std.log.err("Unhandled machine exception code: {d}", .{in_code});
+                        std.log.err("Unhandled machine exception code: {s}", .{@tagName(in_code)});
                     },
                 }
             }

@@ -298,10 +298,10 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\     sw      a1,  68(sp)
                 \\     sw      a0,  72(sp)
                 \\
-                \\     mv      a1, sp
+                \\     mv      a1, sp  // a0 already has the ecall code.
                 \\     call    %[meh]
-                \\
                 \\     mv      sp, a0
+                \\
                 \\     lw      ra, 0(sp)
                 \\     csrw    MEPC, ra
                 \\     lw      ra, 4(sp)
@@ -336,6 +336,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// It does the actual dispatching of the ecall instruction
         ///
         export fn do_machine_exception(in_code: SvcID, sp: [*]usize) callconv(.c) [*]usize {
+
             var ret_sp: [*]usize = sp;
 
             const cause = cpu.csr.mcause.read().code;
