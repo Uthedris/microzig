@@ -191,7 +191,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                     \\    mret
                     :
                     : [sp] "r" (target_sp),
-                    [pc] "r" (target_pc),
+                      [pc] "r" (target_pc),
                     : "t0"
                 );
             } else {
@@ -203,7 +203,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                     \\    mret
                     :
                     : [sp] "r" (target_sp),
-                    [pc] "r" (target_pc),
+                      [pc] "r" (target_pc),
                     : "t0"
                 );
             }
@@ -336,7 +336,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// It does the actual dispatching of the ecall instruction
         ///
         export fn do_machine_exception(in_code: SvcID, sp: [*]usize) callconv(.c) [*]usize {
-
             var ret_sp: [*]usize = sp;
 
             const cause = cpu.csr.mcause.read().code;
@@ -354,15 +353,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 std.log.debug("{s}  Dispatch: {s}", .{ debug_core(), @tagName(in_code) });
 
                 switch (in_code) {
-                    .yield =>
-                    {
+                    .yield => {
                         if (RTTS.current_task[core_id()]) |task| {
                             task.state = .yielded;
                             ret_sp = RTTS.find_next_task_sp(sp);
                         }
                     },
-                    .significant_event =>
-                    {
+                    .significant_event => {
                         for (&RTTS.sig_event) |*sig_event| {
                             sig_event.* = true;
                         }
@@ -370,14 +367,12 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         // If we are running on multiple cores, we need to signal the other core.
 
-                        if (RTTS.core_count > 1)
-                        {
+                        if (RTTS.core_count > 1) {
                             // Set the softirq for the other core
                             SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
                         }
                     },
-                    .wait =>
-                    {
+                    .wait => {
                         if (RTTS.current_task[core_id()]) |task| {
                             // We need to wait if we have a mask and no
                             // mask bit has a corresponding event flag set.
@@ -399,7 +394,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //------------------------------------------------------------------------------
         /// Machine_software interrupt service routine
         ///
-
         pub fn machine_software_ISR() callconv(.naked) noreturn {
             asm volatile (
                 \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
@@ -461,11 +455,10 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         /// This function is called from the machine_software_ISR.
         export fn next_task(sp: [*]usize) callconv(.c) [*]usize {
-            std.log.debug("{s}  ### Software ISR ###", .{ debug_core() });
+            std.log.debug("{s}  ### Software ISR ###", .{debug_core()});
 
             // Clear the softirq for this core
             SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x100 else 0x200);
-
 
             return RTTS.find_next_task_sp(sp);
         }
