@@ -382,8 +382,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                             task.state = .yielded;
                             return RTTS.find_next_task_sp(in_sp);
                         }
-                    }
-                    else {
+                    } else {
                         std.log.err("Yield ignored from handler mode", .{});
                     }
                 },
@@ -426,8 +425,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                                 }
                             }
                         }
-                    }
-                    else {
+                    } else {
                         std.log.err("Wait ignored from handler mode", .{});
                     }
                 },

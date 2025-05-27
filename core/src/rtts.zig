@@ -281,7 +281,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             var need_significant_event = false;
             const the_task = &task_list[@intFromEnum(in_task)];
 
-            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
+//            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
 
             {
                 schedule_mutex.lock();
@@ -418,7 +418,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         //----------------------------------------------------------------------------
         /// Find the stack pointer for the next task to run on current core.
         pub fn find_next_task_sp(in_sp: [*]usize) [*]usize {
-            std.log.debug("{s}  Finding next task", .{platform.debug_core()});
+//            std.log.debug("{s}  Finding next task", .{platform.debug_core()});
 
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
@@ -442,7 +442,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 var a_task: ?*TaskItem = highest_priority_task;
                 while (a_task) |task| {
                     if (task.state == .runnable) {
-                        std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
+//                        std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
 
                         task.state = .running;
                         current_task[platform.core_id()] = task;
