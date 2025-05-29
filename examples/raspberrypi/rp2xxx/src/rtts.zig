@@ -109,7 +109,7 @@ fn taskA() noreturn {
 fn taskB() noreturn {
     while (true) {
         std.log.debug("{s}TaskB -- Signaling task alpha", .{scheduler.platform.debug_core()});
-        scheduler.signal_event(.alpha, 0x01);
+        scheduler.signal_event(.alpha, 0) catch unreachable;
 
         std.log.debug("{s}TaskB -- Yielding", .{scheduler.platform.debug_core()});
         scheduler.yield();
