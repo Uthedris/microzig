@@ -41,6 +41,13 @@ SECTIONS
       *(.bss*)
   } > ram0
 
+  .unallocated_memory (NOLOAD) :
+  {
+      microzig_heap_start = .;
+      . = ORIGIN(ram0) + LENGTH(ram0);
+      microzig_heap_end   = .;
+  } > ram0
+
   /* Unused, but set as extern in startup_logic */
   microzig_data_start = .;
   microzig_data_end = .;

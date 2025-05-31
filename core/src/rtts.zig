@@ -22,6 +22,9 @@ pub const Config = struct {
     /// run tasks in unprivileged mode
     run_unprivileged: bool = false,
 
+    /// Time ticks per second for the RTTS Timer. Default is 100 ticks per second.
+    ticks_per_second: u32 = 100,
+
     /// Platform specific code override.
     platform: ?type = null,
 };
@@ -112,7 +115,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     event_flag: u8,
                 },
                 function: struct {
-                    func: *const fn (param: ?*anyopaque) bool,
+                    func: *const fn (param: ?*anyopaque) void,
                     param: ?*anyopaque,
                 },
             },
@@ -120,7 +123,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             /// Returns a timer initialized with a function
             /// 
             /// Parameters:
-            ///   in_delay - The delay in ticks
+            ///   in_delay - The delay in Timer ticks (see RTTS.Config.ticks_per_second)
             ///   in_respawn - If true, the timer will be respawned when it expires
             ///   in_func - The function to call when the timer expires
             ///   in_param - The parameter to pass to the function
@@ -148,11 +151,11 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             ///   in_task_tag - The task tag to signal
             ///   in_event_flag - The event flag number to signal
             pub fn init_with_event_flag(in_delay: u32, 
-                                      in_respawn: bool, 
-                                      in_task_tag: TaskTag, 
-                                      in_event_flag: u8) !Timer {
+                                        in_respawn: bool, 
+                                        in_task_tag: TaskTag, 
+                                        in_event_flag: u8) !Timer {
 
-                if (in_event_flag == 0 or in_event_flag > config.event_flags_count) {
+                if (in_event_flag >= config.event_flags_count) {
                     return error.InvalidEventFlag;
                 }
 
@@ -178,18 +181,18 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             pub fn get_expiry(self: *Timer) u32 {
                 if (self.expire_in == 0) return 0;
 
-                schedule_mutex.lock();
-                defer schedule_mutex.unlock();
+                timer_mutex.lock();
+                defer timer_mutex.unlock();
 
                 var expiry: u32 = 0;
 
                 var an_item = first_timer;
                 while (an_item != null) {
-                    expiry += an_item.delay;
-                    if (an_item == self) {
+                    expiry += an_item.?.expire_in;
+                    if (an_item.? == self) {
                         return expiry;
                     }
-                    an_item = an_item.next;
+                    an_item = an_item.?.next;
                 }
 
                 return 0;
@@ -209,13 +212,13 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             
                 self.expire_in = self.delay;
 
-                schedule_mutex.lock();
-                defer schedule_mutex.unlock();
+                timer_mutex.lock();
+                defer timer_mutex.unlock();
 
                 self._do_schedule();
             }    
 
-            /// add timer to pending lis
+            /// add timer to pending list
             pub fn _do_schedule(self: *Timer) void {
                 self.expire_in = self.delay;
 
@@ -229,29 +232,30 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                         first.expire_in -= self.expire_in;
                         self.next = first;
                         first_timer = self;
-                        return;
-                    }
+                    } else {
 
-                    // Scan the list looking for the correct position for "self"
+                        // Scan the list looking for the correct position for "self"
 
-                    var an_item = first_timer;
-                    while (an_item.?.next) |next| {
-                        self.expire_in -= an_item.?.expire_in;
-                        
-                        if (next.expire_in <= self.expire_in) {
-                            next.expire_in -= self.expire_in;
-                            self.next = next;
-                            an_item.?.next = self;
-                            return;
+                        var an_item = first_timer;
+                        while (an_item.?.next) |next| {
+                            self.expire_in -= an_item.?.expire_in;
+                            
+                            if (next.expire_in <= self.expire_in) {
+                                next.expire_in -= self.expire_in;
+                                self.next = next;
+                                an_item.?.next = self;
+                                break;
+                            }
+                            
+                            an_item = next;
                         }
-                        
-                        an_item = next;
                     }
                 } else {
                     // No timers on the list, so we are the first
                     
                     first_timer = self;
                     self.next = null;
+
                 }
             }
 
@@ -260,13 +264,14 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 if (self.expire_in == 0) return;
 
-                schedule_mutex.lock();
-                defer schedule_mutex.unlock();
+                timer_mutex.lock();
+                defer timer_mutex.unlock();
 
                 self.expire_in = 0;
 
                 if (first_timer == self) {
                     first_timer = self.next;
+
                     return;
                 }
 
@@ -282,27 +287,42 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
             /// Tick the timer
             pub fn tick() void {
-                schedule_mutex.lock();
-                defer schedule_mutex.unlock();
+                timer_mutex.lock();
+                defer timer_mutex.unlock();
 
-                if (first_timer) |timer| { 
-                    timer.expire_in -= 1;
+                // decrement the expire_in for the first timer
 
-                    if (timer.expire_in == 0) {
-                        first_timer = timer.next;
+                if (first_timer) |timer| timer.expire_in -= 1;
 
-                        if (timer.respawn) {
-                            timer.expire_in = timer.delay;
-                            timer._do_schedule();
-                        }
+                // Perform actions for expired timers
 
-                        switch (timer.action.mode) {                        
-                            .function =>
-                                timer.action.function.func(timer.action.function.param),
-                            .event_flag =>
-                                scheduler.signal_event(timer.action.event_flag.task_tag, timer.action.event_flag.event_flag),
-                        }
+                while (first_timer) |timer| {
 
+                    if (timer.expire_in != 0) break;
+                    
+                    // Remove the timer from the (beginning of) pending list
+
+                    first_timer = timer.next;
+
+                    std.log.debug("Timer expired for task 0x{x:08} next {any}", .{@intFromPtr(timer), timer.next});
+
+                    if (timer.respawn) {
+                        std.log.debug("Timer respawned", .{});
+                        timer._do_schedule();
+                    } else {
+                        std.log.debug("Timer not respawned", .{});
+                    }
+
+                    switch (timer.action) {                        
+                        .function =>
+                        {
+                            timer.action.function.func(timer.action.function.param);
+                        },
+                        .event_flag =>
+                        {
+                           std.log.debug("Sending task {s} event flag {d}", .{@tagName(timer.action.event_flag.task_tag), timer.action.event_flag.event_flag}); 
+                           signal_event_isr(timer.action.event_flag.task_tag, timer.action.event_flag.event_flag) catch unreachable;
+                        },
                     }
                 }
             }
@@ -326,6 +346,9 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
         /// The mutex used to synchronize access to the task list.
         pub var schedule_mutex: interrupt.Mutex = .{};
+
+        /// The mutex used to synchronize access to the timer list.
+        pub var timer_mutex: interrupt.Mutex = .{};
 
         /// The task list
         pub var task_list: [tasks.len]TaskItem = undefined;
@@ -475,6 +498,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// run again after the next significant event or if no other tasks want
         /// to run.
         /// 
+        /// Do not call this function from an interrupt service routine.
+        /// 
         pub fn yield() void {
             const the_task = get_current_task();
             the_task.state = .yielded;
@@ -489,8 +514,21 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// runnable tasks will be run.  A call to this function on one core can
         /// change the tasks assigned to any core.
         /// 
+        /// Do not call this function from an interrupt service routine.
+        /// 
         pub fn significant_event() void {
             platform.significant_event();
+        }
+
+        //----------------------------------------------------------------------------
+        /// Declare a significant event from an interrupt service routine.
+        ///
+        /// The scheduler will re-scan the task list and the highest priority
+        /// runnable tasks will be run.  A call to this function on one core can
+        /// change the tasks assigned to any core.
+        /// 
+        pub fn significant_event_isr() void {
+            platform.significant_event_isr();
         }
 
         //----------------------------------------------------------------------------
@@ -504,34 +542,34 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///   in_task  - The index of the task to signal
         ///   in_event - The event to signal
         /// 
+        /// Do not call this function from an interrupt service routine.
+        /// 
         pub fn signal_event(in_task: TaskTag, in_event: u8) !void {
                 
-            if (in_event == 0 or in_event > config.event_flags_count) {
-                return error.InvalidEventFlag;
-                }
-
-            var need_significant_event = false;
-            const the_task = &task_list[@intFromEnum(in_task)];
-
-//            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
-
-            {
-                schedule_mutex.lock();
-                defer schedule_mutex.unlock();
-
-                const setFlag = @as(EventFlags, 1) << @intCast(in_event);
-
-                the_task.event_flags |= setFlag;
-
-                if ((the_task.event_mask & setFlag) != 0 and the_task.state == .waiting) {
-                    the_task.state = .runnable;
-                    need_significant_event = true;
-                }
+            if (try _signal_task(in_task, in_event)) {
+                significant_event();
             }
-
-            if (need_significant_event) platform.significant_event();
         }
 
+        //----------------------------------------------------------------------------
+        /// Signal an event to the indicated task from an interrupt service routine.
+        ///
+        /// This function will set the specified event flag for the task, and, if the
+        /// task was waiting on that event flag, the task will be marked as runnable
+        /// and a significant event will be declared.
+        ///
+        /// Parameters:
+        ///   in_task  - The index of the task to signal
+        ///   in_event - The event to signal
+        /// 
+        /// Do not call this function from an interrupt service routine.
+        /// 
+        pub fn signal_event_isr(in_task: TaskTag, in_event: u8) !void {
+            if (try _signal_task(in_task, in_event)) {
+                significant_event_isr();
+            }
+        }
+        
         //----------------------------------------------------------------------------
         /// Get the priority of a task.
         ///
@@ -733,6 +771,35 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             }
 
             return retval;
+        }
+
+        //----------------------------------------------------------------------------
+
+        fn _signal_task(in_task: TaskTag, in_event: u8) !bool {
+            if (in_event >= config.event_flags_count) {
+                return error.InvalidEventFlag;
+            }
+
+            var need_significant_event = false;
+            const the_task = &task_list[@intFromEnum(in_task)];
+
+            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
+
+            {
+                schedule_mutex.lock();
+                defer schedule_mutex.unlock();
+
+                const setFlag = @as(EventFlags, 1) << @intCast(in_event);
+
+                the_task.event_flags |= setFlag;
+
+                if ((the_task.event_mask & setFlag) != 0 and the_task.state == .waiting) {
+                    the_task.state = .runnable;
+                    need_significant_event = true;
+                }
+            }
+
+            return need_significant_event;
         }
     };
 }

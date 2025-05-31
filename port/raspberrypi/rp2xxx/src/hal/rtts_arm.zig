@@ -30,6 +30,7 @@ const PPB = peripherals.PPB;
 const SIO = peripherals.SIO;
 
 const scb = cpu.peripherals.scb;
+const systick = cpu.peripherals.systick;
 
 const SvcID = enum(u8) {
     yield = 0x00,
@@ -46,7 +47,6 @@ const FIFOCommand = enum(u8) {
 // ### TODO ###  Support running tasks in unprivileged mode
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
-    _ = config;
 
     return struct {
         const Platform = @This();
@@ -118,16 +118,43 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 16]);
 
-            // Set the priority of the PendSV exception to the lowest possible value
+            // Set the priority of the PendSV exception to the lowest possible value (which
+            // is numerically the highest value)
 
             if (compatibility.chip == .RP2040) {
-                PPB.SHPR3.modify(.{ .PRI_14 = 0, .PRI_15 = 0 });
+                PPB.SHPR3.modify(.{ .PRI_14 = 3 });
             } else {
-                PPB.SHPR3.modify(.{ .PRI_14_3 = 0, .PRI_15_3 = 0 });
+                PPB.SHPR3.modify(.{ .PRI_14_3 = 7 });
             }
 
             _ = cpu.interrupt.exception.set_handler(.SVCall, .{ .naked = svc_ISR });
             _ = cpu.interrupt.exception.set_handler(.PendSV, .{ .naked = pendsv_ISR });
+            _ = cpu.interrupt.exception.set_handler(.SysTick, .{ .c = sysTick_ISR });
+
+            // Configure the systick timer
+
+            var sys_tick_count = systick.CALIB.read().TENMS;
+            sys_tick_count = @intCast(@as(u32, 100) * sys_tick_count  / config.ticks_per_second);
+
+            systick.LOAD.write(.{
+                .RELOAD = 1_530_000, // sys_tick_count,
+            });
+    
+            systick.VAL.write(.{
+                .CURRENT = 0,
+            });
+
+            systick.CTRL.write(.{
+                .ENABLE = 1,
+                .TICKINT = 1,
+                .COUNTFLAG = 0,
+                .CLKSOURCE = 1,
+            });
+
+            std.log.debug("-- SysTick CTRL: 0x{x:08}", .{systick.CTRL.raw});
+            std.log.debug("-- SysTick CALIB: 0x{x:08}", .{systick.CALIB.raw});
+            std.log.debug("-- SysTick VAL: {d}", .{systick.VAL.raw});
+            std.log.debug("-- SysTick LOAD: {d}", .{systick.LOAD.raw});
 
             // Setup for multiple cores if configured.
 
@@ -146,6 +173,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 }
             }
 
+            // Run the first task on this core
+
             run_first_task();
         }
 
@@ -161,6 +190,26 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn significant_event() void {
             asm volatile ("svc #1");
+        }
+
+        //------------------------------------------------------------------------------
+        /// Send the significant event SVC
+        ///
+        pub fn significant_event_isr() void {
+            for (&RTTS.sig_event) |*sig_event| {
+                sig_event.* = true;
+            }
+
+            if (RTTS.core_count > 1) {
+                if (compatibility.chip == .RP2040) {
+                    send_fifo_command(.dispatch, null, null);
+                } else {
+                    multicore.doorbell.set(0);
+                }
+            }
+
+            // Set pendsv to switch the task after the handler returns
+            scb.ICSR.modify(.{ .PENDSVSET = 1 });
         }
 
         //------------------------------------------------------------------------------
@@ -367,6 +416,11 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         fn do_SVC(in_sp: [*]usize, in_pc: usize, in_handler_mode: bool) callconv(.c) [*]usize {
             const svc_id: SvcID = @enumFromInt(@as(*u16, @ptrFromInt(in_pc - 2)).* & 0xff);
 
+            if (in_handler_mode) {
+                std.log.err("SVC {s} called from handler mode. -- ignored", .{@tagName(svc_id)});
+                return in_sp;
+            }
+
             // std.log.debug("do_SVC: svc_id: {s} in_sp: 0x{x:08} in_pc: 0x{x:08} handler_mode: {s}", .{@tagName(svc_id), @intFromPtr(in_sp), in_pc, if (in_handler_mode) "true" else "false"});
 
             // for (0..16) |i| {
@@ -377,13 +431,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             switch (svc_id) {
                 .yield => {
-                    if (!in_handler_mode) {
-                        if (RTTS.current_task[core_id()]) |task| {
-                            task.state = .yielded;
-                            return RTTS.find_next_task_sp(in_sp);
-                        }
-                    } else {
-                        std.log.err("Yield ignored from handler mode", .{});
+                    if (RTTS.current_task[core_id()]) |task| {
+                        task.state = .yielded;
+                        return RTTS.find_next_task_sp(in_sp);
                     }
                 },
                 .significant_event => {
@@ -399,39 +449,29 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                         }
                     }
 
-                    if (in_handler_mode) {
-                        // we cannot switch task directly as we've lost track of the
-                        // task's context.  Set pendsv to switch the task after the
-                        // handler returns.
-                        scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                        asm volatile ("isb");
-                    } else {
-                        return RTTS.find_next_task_sp(in_sp);
-                    }
+                    return RTTS.find_next_task_sp(in_sp);
                 },
                 .wait => {
-                    if (!in_handler_mode) {
-                        if (RTTS.current_task[core_id()]) |task| {
-                            // We need to wait if we have a mask and no
-                            // mask bit has a corresponding event flag set.
+                    if (RTTS.current_task[core_id()]) |task| {
+                        // We need to wait if we have a mask and no
+                        // mask bit has a corresponding event flag set.
 
-                            if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                                task.state = .waiting;
-                                if (in_handler_mode) {
-                                    scb.ICSR.modify(.{ .PENDSVSET = 1 });
-                                    asm volatile ("isb");
-                                } else {
-                                    return RTTS.find_next_task_sp(in_sp);
-                                }
-                            }
+                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
+                            task.state = .waiting;
+                            return RTTS.find_next_task_sp(in_sp);
                         }
-                    } else {
-                        std.log.err("Wait ignored from handler mode", .{});
                     }
                 },
             }
 
             return in_sp;
+        }
+        
+        //------------------------------------------------------------------------------
+        /// sysTick interrupt service routine
+        ///
+        pub fn sysTick_ISR() callconv(.c) void {
+            RTTS.Timer.tick();
         }
 
         //------------------------------------------------------------------------------
@@ -586,8 +626,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //==============================================================================
         // Local handler mode functions
         //==============================================================================
-        // These functions are with the scheduler mutex locked
-        // and must not be called from user mode.
 
         //------------------------------------------------------------------------------
         /// Send a command to the other core
@@ -615,6 +653,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // If the send fifo is full then ping the other core
             // so that it reads something off of the fifo.
+
+            const cs = microzig.interrupt.enter_critical_section();
+            defer cs.leave();
 
             if (!multicore.fifo.is_write_ready()) cpu.sev();
 
