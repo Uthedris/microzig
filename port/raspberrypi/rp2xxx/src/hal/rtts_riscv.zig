@@ -132,6 +132,27 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
+        /// Post a significant event
+        ///
+        pub fn significant_event_isr() void {
+            for (&RTTS.sig_event) |*sig_event| {
+                sig_event.* = true;
+            }
+
+            // Trigger the softirq for this core to check for a context switch 
+            // once the current interrupt exits.
+
+            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x01 else 0x02);
+
+            // If we are running on multiple cores, we need to signal the other core too.
+
+            if (RTTS.core_count > 1) {
+                // Set the softirq for the other core
+                SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
+            }
+        }
+
+        //------------------------------------------------------------------------------
         /// Send the wait SVC
         ///
         pub fn wait() void {
@@ -462,6 +483,14 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             return RTTS.find_next_task_sp(sp);
         }
+        
+        //------------------------------------------------------------------------------
+        /// machine timer interrupt service routine
+        ///
+        pub fn machine_timer_ISR() callconv(riscv_calling_convention) void {
+            RTTS.Timer.tick();
+        }
+
 
         //==============================================================================
         // Null Task
