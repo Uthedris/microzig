@@ -222,8 +222,17 @@ pub const startup_logic = struct {
         microzig_main();
     }
 
-    fn unhandled_interrupt() callconv(riscv_calling_convention) void {
-        @panic("unhandled core interrupt");
+    fn unhandled_exception() callconv(riscv_calling_convention) void {
+        var buf: [32]u8 = undefined;
+        @panic(std.fmt.bufPrint(&buf, "unhandled exception: {d}", .{csr.mcause.read_raw()}) catch unreachable );
+    }
+
+    fn unhandled_software_interrupt() callconv(riscv_calling_convention) void {
+        @panic("unhandled software interrupt");
+    }
+
+    fn unhandled_timer_interrupt() callconv(riscv_calling_convention) void {
+        @panic("unhandled timer interrupt");
     }
 
     /// This is the master vector table.  It is placed at the start of flash
@@ -231,9 +240,9 @@ pub const startup_logic = struct {
     pub export fn _vector_table() align(64) linksection("core_vectors") callconv(.naked) noreturn {
         comptime {
             // NOTE: using the union variant .naked here is fine because both variants have the same layout
-            @export(if (microzig_options.interrupts.Exception) |handler| handler.naked else &unhandled_interrupt, .{ .name = "_exception_handler" });
-            @export(if (microzig_options.interrupts.MachineSoftware) |handler| handler.naked else &unhandled_interrupt, .{ .name = "_machine_software_handler" });
-            @export(if (microzig_options.interrupts.MachineTimer) |handler| handler.naked else &unhandled_interrupt, .{ .name = "_machine_timer_handler" });
+            @export(if (microzig_options.interrupts.Exception) |handler| handler.naked else &unhandled_exception, .{ .name = "_exception_handler" });
+            @export(if (microzig_options.interrupts.MachineSoftware) |handler| handler.naked else &unhandled_software_interrupt, .{ .name = "_machine_software_handler" });
+            @export(if (microzig_options.interrupts.MachineTimer) |handler| handler.naked else &unhandled_timer_interrupt, .{ .name = "_machine_timer_handler" });
             @export(if (microzig_options.interrupts.MachineExternal) |handler| handler.naked else &machine_external_interrupt, .{ .name = "_machine_external_handler" });
         }
 

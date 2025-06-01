@@ -7,8 +7,6 @@
 //!   - Exception handler (Machine Exception) for `ecall` instruction dispatch.
 //!   - Machine Software interrupt for inter-core communication (when configured for both cores).
 
-// ### TODO ###  Test calling "significant_event()" and "signal_event()" from an interrupt handler.
-
 const std = @import("std");
 const microzig = @import("microzig");
 
@@ -108,58 +106,83 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 multicore.launch_core1(run_first_task);
             }
 
+            // Configure the machine timer
+
+            disable_timer_interrupt();
+
+            SIO.MTIME_CTRL.modify(.{ .EN = 0 });
+
+            SIO.MTIME.write_raw(0);
+            SIO.MTIMEH.write_raw(0);
+                
+            const initial_timer_value = 1_000_000 / config.resolution;
+
+            // Note: If the timer expires too soon, it will cause a machine exception.
+            //       If debug logging is added to run_first_task, the initial timer
+            //       value should be set to a larger value to allow time for the
+            //       first task to run before the timer expires.
+            
+            SIO.MTIMECMPH.write_raw(0);
+            SIO.MTIMECMP.write_raw(initial_timer_value);            
+
+            SIO.MTIME_CTRL.modify(.{ .EN = 1 });
+
+            if (RTTS.first_timer != null) {
+                cpu.interrupt.core.enable(.MachineTimer);
+            }
+
             run_first_task();
         }
 
-        //------------------------------------------------------------------------------
-        /// Send the yield SVC
-        ///
-        pub fn yield() void {
-            asm volatile (
-                \\ li    a0, 0
-                \\ ecall
-            );
-        }
 
         //------------------------------------------------------------------------------
-        /// Post a significant event
+        /// Perform a reschedule (this core)
         ///
-        pub fn significant_event() void {
-            asm volatile (
-                \\ li    a0, 1
-                \\ ecall
-            );
-        }
-
-        //------------------------------------------------------------------------------
-        /// Post a significant event
-        ///
-        pub fn significant_event_isr() void {
-            for (&RTTS.sig_event) |*sig_event| {
-                sig_event.* = true;
-            }
-
-            // Trigger the softirq for this core to check for a context switch 
-            // once the current interrupt exits.
-
+        pub fn reschedule() void {
+            // Trigger the softirq for this core
             SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x01 else 0x02);
+        }
 
-            // If we are running on multiple cores, we need to signal the other core too.
-
+        //------------------------------------------------------------------------------
+        /// Perform a reschedule (all cores)
+        ///
+        pub fn reschedule_all_cores() void {
             if (RTTS.core_count > 1) {
-                // Set the softirq for the other core
+                // Trigger the softirq for the other core
                 SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
             }
+
+            // Trigger the softirq for this core
+            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x01 else 0x02);
         }
 
         //------------------------------------------------------------------------------
-        /// Send the wait SVC
+        /// Perfom a reschedule_all_cores from an ISR.
+        /// For the RP2xxx this is the same as the normal reschedule_all_cores.
         ///
-        pub fn wait() void {
-            asm volatile (
-                \\ li    a0, 2
-                \\ ecall
-            );
+        pub fn reschedule_all_cores_isr() void {
+            reschedule_all_cores();
+        }
+
+        //------------------------------------------------------------------------------
+        /// Enable the timer interrupt
+        pub fn enable_timer_interrupt() void {
+            var new_time: u64 = SIO.MTIMEH.raw;
+            new_time <<= 32; 
+            new_time += SIO.MTIME.raw;
+
+            new_time += 1_000_000 / config.resolution;
+            
+            SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
+            SIO.MTIMECMP.write_raw(@truncate(new_time));            
+
+            cpu.interrupt.core.enable(.MachineTimer);
+        }
+
+        //------------------------------------------------------------------------------
+        /// Disable the timer interrupt
+        pub fn disable_timer_interrupt() void {
+            cpu.interrupt.core.disable(.MachineTimer);
         }
 
         //==============================================================================
@@ -169,8 +192,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //------------------------------------------------------------------------------
         /// Run the first task on this core
         fn run_first_task() noreturn {
-            std.log.debug("{s}Entered run_first_task", .{debug_core()});
-
             if (RTTS.core_count > 1) {
                 irq.globally_enable();
                 cpu.interrupt.core.enable(.MachineSoftware);
@@ -196,11 +217,14 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         target_pc = a_task.stack_pointer[0];
                         target_sp = a_task.stack_pointer + 32;
-
-                        std.log.debug("{s}   Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ debug_core(), @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
                         break;
                     }
                 }
+            }
+
+            if (core_id() == 0) {
+                irq.globally_enable();
+                cpu.interrupt.core.enable(.MachineSoftware);
             }
 
             if (config.run_unprivileged) {
@@ -236,20 +260,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // Interrupt service routines
         //==============================================================================
         // These ISR's  need to be registered.
-        //  1. me_ISR   - (Exception)
-        //  2. ms_ISR   - (Machine Software) The inter-core interrupt service routine
-
-        //  For time functions?
-        //  3. mt_ISR   - (Machine Timer) The sysTick interrupt service routine
+        //  - ms_ISR   - (Machine Software) The reschedule interrupt service routine
         //
-        //  For intercore interrupt?
-        //  4. ms_ISR   - (Machine Software) The inter-core interrupt service routine
+        //  For time functions?
+        //  - mt_ISR   - (Machine Timer) The sysTick interrupt service routine
 
         //------------------------------------------------------------------------------
-        /// Machine_exception interrupt service routine
-        ///
-        /// This isr fires when machine exception is triggered.
-        /// We use this to handle ecall instructions.
+        /// Machine_software interrupt service routine
         ///
         /// This ISR is registered as a naked function, so we can save the registers
         /// and restore the registers in a predicable way. This function calls
@@ -293,128 +310,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //      |  ra        | +  124  (31)
         //      +------------+
 
-        pub fn machine_exception_ISR() callconv(.naked) noreturn {
-            asm volatile (
-                \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
-                \\     addi    sp, sp, -64
-                \\     csrr    ra,  MEPC
-                \\     sw      ra,  0(sp)
-                \\     csrr    ra,  MSTATUS
-                \\     sw      ra,  4(sp)
-                \\     sw      gp,  8(sp)
-                \\     sw      tp,  12(sp)
-                \\     sw      t6,  16(sp)
-                \\     sw      t5,  20(sp)
-                \\     sw      t4,  24(sp)
-                \\     sw      t3,  28(sp)
-                \\     sw      t2,  32(sp)
-                \\     sw      t1,  36(sp)
-                \\     sw      t0,  40(sp)
-                \\     sw      a7,  44(sp)
-                \\     sw      a6,  48(sp)
-                \\     sw      a5,  52(sp)
-                \\     sw      a4,  56(sp)
-                \\     sw      a3,  60(sp)
-                \\     sw      a2,  64(sp)
-                \\     sw      a1,  68(sp)
-                \\     sw      a0,  72(sp)
-                \\
-                \\     mv      a1, sp  // a0 already has the ecall code.
-                \\     call    %[meh]
-                \\     mv      sp, a0
-                \\
-                \\     lw      ra, 0(sp)
-                \\     csrw    MEPC, ra
-                \\     lw      ra, 4(sp)
-                \\     csrw    MSTATUS, ra
-                \\     lw      gp,  8(sp)
-                \\     lw      tp,  12(sp)
-                \\     lw      t6,  16(sp)
-                \\     lw      t5,  20(sp)
-                \\     lw      t4,  24(sp)
-                \\     lw      t3,  28(sp)
-                \\     lw      t2,  32(sp)
-                \\     lw      t1,  36(sp)
-                \\     lw      t0,  40(sp)
-                \\     lw      a7,  44(sp)
-                \\     lw      a6,  48(sp)
-                \\     lw      a5,  52(sp)
-                \\     lw      a4,  56(sp)
-                \\     lw      a3,  60(sp)
-                \\     lw      a2,  64(sp)
-                \\     lw      a1,  68(sp)
-                \\     lw      a0,  72(sp)
-                \\     addi    sp,  sp, 64
-                \\     cm.pop {ra,s0-s11},64   // Restore x1, x8, x9 and x18-x27
-                \\     mret
-                :
-                : [meh] "i" (do_machine_exception),
-            );
-        }
-
-        /// This function is called from the machine_exception_ISR
-        ///
-        /// It does the actual dispatching of the ecall instruction
-        ///
-        export fn do_machine_exception(in_code: SvcID, sp: [*]usize) callconv(.c) [*]usize {
-            var ret_sp: [*]usize = sp;
-
-            const cause = cpu.csr.mcause.read().code;
-
-            if (cause == 0x08 or cause == 0x0b) {
-                // We got here due to an ecall instruction.  The what that works
-                // leaves the PC pointing to the ecall instruction itself.  We
-                // must bump it by four bytes to point to the next instruction.
-
-                sp[0] += 4;
-
-                // Dispatch the instruction. This may change the stack pointer.
-                // if a new task is dispatched.
-
-                std.log.debug("{s}  Dispatch: {s}", .{ debug_core(), @tagName(in_code) });
-
-                switch (in_code) {
-                    .yield => {
-                        if (RTTS.current_task[core_id()]) |task| {
-                            task.state = .yielded;
-                            ret_sp = RTTS.find_next_task_sp(sp);
-                        }
-                    },
-                    .significant_event => {
-                        for (&RTTS.sig_event) |*sig_event| {
-                            sig_event.* = true;
-                        }
-                        ret_sp = RTTS.find_next_task_sp(sp);
-
-                        // If we are running on multiple cores, we need to signal the other core.
-
-                        if (RTTS.core_count > 1) {
-                            // Set the softirq for the other core
-                            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
-                        }
-                    },
-                    .wait => {
-                        if (RTTS.current_task[core_id()]) |task| {
-                            // We need to wait if we have a mask and no
-                            // mask bit has a corresponding event flag set.
-                            if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                                task.state = .waiting;
-                                ret_sp = RTTS.find_next_task_sp(sp);
-                            }
-                        }
-                    },
-                    else => {
-                        std.log.err("Unhandled machine exception code: {d}", .{in_code});
-                    },
-                }
-            }
-
-            return ret_sp;
-        }
-
-        //------------------------------------------------------------------------------
-        /// Machine_software interrupt service routine
-        ///
         pub fn machine_software_ISR() callconv(.naked) noreturn {
             asm volatile (
                 \\     cm.push {ra,s0-s11},-64   // Save x1, x8, x9 and x18-x27
@@ -476,21 +371,30 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         /// This function is called from the machine_software_ISR.
         export fn next_task(sp: [*]usize) callconv(.c) [*]usize {
-            std.log.debug("{s}  ### Software ISR ###", .{debug_core()});
+            // std.log.debug("{s}  ### Software ISR ###", .{debug_core()});
 
             // Clear the softirq for this core
             SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x100 else 0x200);
 
             return RTTS.find_next_task_sp(sp);
         }
-        
+
         //------------------------------------------------------------------------------
         /// machine timer interrupt service routine
         ///
         pub fn machine_timer_ISR() callconv(riscv_calling_convention) void {
+
+            var new_time: u64 = SIO.MTIMECMPH.raw;
+            new_time <<= 32; 
+            new_time += SIO.MTIMECMP.raw;
+
+            new_time += 1_000_000 / config.resolution;
+            
+            SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
+            SIO.MTIMECMP.write_raw(@truncate(new_time));            
+ 
             RTTS.Timer.tick();
         }
-
 
         //==============================================================================
         // Null Task

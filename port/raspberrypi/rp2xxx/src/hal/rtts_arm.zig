@@ -47,7 +47,6 @@ const FIFOCommand = enum(u8) {
 // ### TODO ###  Support running tasks in unprivileged mode
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
-
     return struct {
         const Platform = @This();
 
@@ -127,26 +126,29 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 PPB.SHPR3.modify(.{ .PRI_14_3 = 7 });
             }
 
-            _ = cpu.interrupt.exception.set_handler(.SVCall, .{ .naked = svc_ISR });
             _ = cpu.interrupt.exception.set_handler(.PendSV, .{ .naked = pendsv_ISR });
             _ = cpu.interrupt.exception.set_handler(.SysTick, .{ .c = sysTick_ISR });
 
             // Configure the systick timer
 
-            var sys_tick_count = systick.CALIB.read().TENMS;
-            sys_tick_count = @intCast(@as(u32, 100) * sys_tick_count  / config.ticks_per_second);
+            _ = config.resolution;
+
+            // var sys_tick_count = systick.CALIB.read().TENMS;
+            // sys_tick_count = @intCast(@as(u32, 100) * sys_tick_count / config.resolution);
+
+            // ### TODO ### automatically calculate the systick timer count based on clock frequency.
 
             systick.LOAD.write(.{
                 .RELOAD = 1_530_000, // sys_tick_count,
             });
-    
+
             systick.VAL.write(.{
                 .CURRENT = 0,
             });
 
             systick.CTRL.write(.{
                 .ENABLE = 1,
-                .TICKINT = 1,
+                .TICKINT = 0,
                 .COUNTFLAG = 0,
                 .CLKSOURCE = 1,
             });
@@ -158,8 +160,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // Setup for multiple cores if configured.
 
-            if (irq.has_ram_vectors()) {
-                if (RTTS.core_count > 1) {
+            if (RTTS.core_count > 1) {
+                if (irq.can_set_handler()) {
                     if (compatibility.chip == .RP2040) {
                         _ = irq.set_handler(.SIO_IRQ_PROC0, .{ .c = fifo_ISR });
                         _ = irq.set_handler(.SIO_IRQ_PROC1, .{ .c = fifo_ISR });
@@ -169,8 +171,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                     // Note: We don't enable these interrupts until after the other core is
                     // launched, so we don't mess with the launch sequence.
 
-                    multicore.launch_core1(run_first_task);
                 }
+
+                multicore.launch_core1(run_first_task);
+            }
+
+            if (RTTS.first_timer != null) {
+                enable_timer_interrupt();
             }
 
             // Run the first task on this core
@@ -179,27 +186,16 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
-        /// Send the yield SVC
+        /// Perform a reschedule (this core)
         ///
-        pub fn yield() void {
-            asm volatile ("svc #0");
+        pub fn reschedule() void {
+            scb.ICSR.modify(.{ .PENDSVSET = 1 });
         }
 
         //------------------------------------------------------------------------------
-        /// Send the significant event SVC
+        /// Perform a reschedule (all cores)
         ///
-        pub fn significant_event() void {
-            asm volatile ("svc #1");
-        }
-
-        //------------------------------------------------------------------------------
-        /// Send the significant event SVC
-        ///
-        pub fn significant_event_isr() void {
-            for (&RTTS.sig_event) |*sig_event| {
-                sig_event.* = true;
-            }
-
+        pub fn reschedule_all_cores() void {
             if (RTTS.core_count > 1) {
                 if (compatibility.chip == .RP2040) {
                     send_fifo_command(.dispatch, null, null);
@@ -208,15 +204,27 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 }
             }
 
-            // Set pendsv to switch the task after the handler returns
             scb.ICSR.modify(.{ .PENDSVSET = 1 });
         }
 
         //------------------------------------------------------------------------------
-        /// Send the wait SVC
+        /// Perfom a reschedule_all_cores from an ISR.
+        /// For the RP2xxx this is the same as the normal reschedule_all_cores.
         ///
-        pub fn wait() void {
-            asm volatile ("svc #2");
+        pub fn reschedule_all_cores_isr() void {
+            reschedule_all_cores();
+        }
+
+        //------------------------------------------------------------------------------
+        /// Enable the timer interrupt
+        pub fn enable_timer_interrupt() void {
+            systick.CTRL.modify(.{ .TICKINT = 1 });
+        }
+
+        //------------------------------------------------------------------------------
+        /// Disable the timer interrupt
+        pub fn disable_timer_interrupt() void {
+            systick.CTRL.modify(.{ .TICKINT = 0 });
         }
 
         //==============================================================================
@@ -293,180 +301,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //==============================================================================
         // Interrupt service routines
         //==============================================================================
-        // There are three ISR's that need to be registered.
-        //  1. svc_ISR     - (SVCall) The svc interrupt service routine
-        //  2. pendsv_ISR  - (PendSV) The pendsv interrupt service routine
-        //  3. fifo_ISR    - (The inter-core communication interrupt service routine
+        // There are some ISR's that need to be registered.
+        //  - pendsv_ISR  - (PendSV) The pendsv interrupt service routine
+        //  - fifo_ISR    - (The inter-core communication interrupt service routine
         //
         //  For time functions?
-        //  4. sysTick_ISR - (SysTick) The sysTick interrupt service routine
+        //  - sysTick_ISR - (SysTick) The sysTick interrupt service routine
 
-        //------------------------------------------------------------------------------
-        /// SVC interrupt service routine
-        ///
-        /// This ISR is registered as a naked function, so we can save the registers
-        /// and restore the registers in a predicable way.
-        ///
-        pub fn svc_ISR() callconv(.naked) noreturn {
-            // Upon entry the caller's stack looks like this:
-            //      +--------+
-            //      |  r0    | <- Stack pointer
-            //      |  r1    | +  1
-            //      |  r2    | +  2
-            //      |  r3    | +  3
-            //      |  r12   | +  4
-            //      |  lr    | +  5
-            //      |  pc    | +  6
-            //      |  xPSR  | +  7
-            //      +--------+
-            //
-            //    We need to get a pointer to the callers stack so we can figure out
-            //    the trap code How we do it depends on whether the SVC was called
-            //    from code using a process stack (a task) or the main stack (an
-            //    interrupt service routine).
-            //
-            //    We can tell by looking at the link register:
-            //          LR value       source mode    source stack
-            //       --------------    -----------    -------------------
-            //       -3 (0xfffffffd)   Thread mode    Process stack
-            //       -7 (0xfffffff9)   Thread mode    Main stack (not used)
-            //      -15 (0xfffffff1)   Handler mode   Main stack
-            //
-            //    If we were called from a task, the link register will be -3, and
-            //    the task's stack pointer will be saved in PSP special register.
-            //
-            //    If we were called from an interrupt service routine, the link
-            //    register will be -7 or -15 and the current stack pointer will be
-            //    the same as the caller.
-            //
-            //  When Calling do_SVC the caller's stack looks like this:
-            //
-            //       +--------+
-            //       |  r8    | <- Stack pointer (thread mode)
-            //       |  r9    | +  4
-            //       |  r10   | +  8
-            //       |  r11   | + 12
-            //       |  r4    | + 16
-            //       |  r5    | + 20
-            //       |  r6    | + 24
-            //       |  r7    | + 28
-            //       |  r0    | + 32      <-- Stack pointer (handler mode)
-            //       |  r1    | + 36      + 4
-            //       |  r2    | + 40      + 8
-            //       |  r3    | + 44      + 12
-            //       |  r12   | + 48      + 16
-            //       |  lr    | + 52      + 20
-            //       |  pc    | + 56      + 24
-            //       |  xPSR  | + 60      + 28
-            //       +--------+
-
-            asm volatile (
-                \\    movs  r0,   #0xff
-                \\    mov   r1,   lr
-                \\    ands  r0,   r1
-                \\    cmp   r0,   #0xf1
-                \\    beq   handler_mode
-                \\
-                \\    mrs   r0,    psp
-                \\    subs  r0,    #16
-                \\    stm   r0!,   {r4, r5, r6, r7}
-                \\    mov   r4,    r8
-                \\    mov   r5,    r9
-                \\    mov   r6,    r10
-                \\    mov   r7,    r11
-                \\    subs  r0,    #16
-                \\
-                \\    subs  r0,    #16
-                \\    stm   r0!,   {r4, r5, r6, r7}
-                \\    subs  r0,    #16
-                \\
-                \\    mov   r5,   lr
-                \\                                      @ Pass the old task's stack pointer
-                \\    movs  r1,   #56
-                \\    ldr   r1,   [r1, r0]              @ set 2nd param to caller's pc
-                \\    movs  r2,   #0                    @ set 3rd param to false
-                \\    bl    %[do_SVC]                   @ to findNextTaskSP, which returns
-                \\    mov   lr,   r5                    @ the new task's stack pointer.
-                \\
-                \\    ldm   r0!,  {r4, r5, r6, r7}      @ Restore the registers we saved
-                \\    mov   r8,   r4
-                \\    mov   r9,   r5
-                \\    mov   r10,  r6
-                \\    mov   r11,  r7
-                \\    ldm   r0!,  {r4, r5, r6, r7}
-                \\    msr   psp,  r0
-                \\    bx    lr
-                \\
-                \\ handler_mode:
-                \\    mov   r5,   lr
-                \\    movs  r1,   #24
-                \\    ldr   r1,   [r0, r1]              @ set 2nd param to caller's pc
-                \\    movs  r3,   #1                    @ set 3rd param to true
-                \\    bl    %[do_SVC]                   @ to findNextTaskSP, which returns
-                \\    mov   lr,   r5                    @ the new task's stack pointer.
-                \\    bx    lr
-                :
-                : [do_SVC] "s" (&do_SVC),
-            );
-        }
-
-        // If we were called from thread mode all the registers have been saved
-        // we can do the dispatch directly and return the new stack pointer.
-
-        fn do_SVC(in_sp: [*]usize, in_pc: usize, in_handler_mode: bool) callconv(.c) [*]usize {
-            const svc_id: SvcID = @enumFromInt(@as(*u16, @ptrFromInt(in_pc - 2)).* & 0xff);
-
-            if (in_handler_mode) {
-                std.log.err("SVC {s} called from handler mode. -- ignored", .{@tagName(svc_id)});
-                return in_sp;
-            }
-
-            // std.log.debug("do_SVC: svc_id: {s} in_sp: 0x{x:08} in_pc: 0x{x:08} handler_mode: {s}", .{@tagName(svc_id), @intFromPtr(in_sp), in_pc, if (in_handler_mode) "true" else "false"});
-
-            // for (0..16) |i| {
-            //     std.log.debug("    sp +{d:3}  0x{x:08}", .{i * 4, in_sp[i]});
-            // }
-
-            std.log.debug("{s}  Dispatch: {s}", .{ debug_core(), @tagName(svc_id) });
-
-            switch (svc_id) {
-                .yield => {
-                    if (RTTS.current_task[core_id()]) |task| {
-                        task.state = .yielded;
-                        return RTTS.find_next_task_sp(in_sp);
-                    }
-                },
-                .significant_event => {
-                    for (&RTTS.sig_event) |*sig_event| {
-                        sig_event.* = true;
-                    }
-
-                    if (RTTS.core_count > 1) {
-                        if (compatibility.chip == .RP2040) {
-                            send_fifo_command(.dispatch, null, null);
-                        } else {
-                            multicore.doorbell.set(0);
-                        }
-                    }
-
-                    return RTTS.find_next_task_sp(in_sp);
-                },
-                .wait => {
-                    if (RTTS.current_task[core_id()]) |task| {
-                        // We need to wait if we have a mask and no
-                        // mask bit has a corresponding event flag set.
-
-                        if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                            task.state = .waiting;
-                            return RTTS.find_next_task_sp(in_sp);
-                        }
-                    }
-                },
-            }
-
-            return in_sp;
-        }
-        
         //------------------------------------------------------------------------------
         /// sysTick interrupt service routine
         ///
@@ -554,7 +395,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
-        /// FIFO interrupt service routine
+        /// FIFO interrupt service routine (RP2040 only)
         ///
         pub fn fifo_ISR() callconv(.c) void {
             var theParam: u32 = 0;
@@ -613,7 +454,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         }
 
         //------------------------------------------------------------------------------
-        /// Doorbell interrupt service routine
+        /// Doorbell interrupt service routine (RP2350 only)
         ///
         ///
         pub fn doorbell_ISR() callconv(.c) void {

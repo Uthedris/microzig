@@ -92,59 +92,33 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             // ### TODO ### uncomment below when we allow these to be set at runtime
             // _ = cpu.interrupt.core.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
 
+            // Configure the tick timer
+
+            // ### TODO ### configure the tick timer for esp32-c3
+
             run_first_task();
         }
 
         //------------------------------------------------------------------------------
-        /// Send the yield SVC
+        /// Perform a reschedule (this core)
         ///
-        pub fn yield() void {
-            asm volatile (
-                \\ li    a0, 0
-                \\ ecall
-            );
+        pub fn reschedule() void {
+            // ### TODO ### Schedule task switch when not in interrupt handler
         }
 
         //------------------------------------------------------------------------------
-        /// Post a significant event
+        /// Perform a reschedule (all cores)
         ///
-        pub fn significant_event() void {
-            asm volatile (
-                \\ li    a0, 1
-                \\ ecall
-            );
-        }
-
-
-        //------------------------------------------------------------------------------
-        /// Post a significant event
-        ///
-        pub fn significant_event_isr() void {
-            for (&RTTS.sig_event) |*sig_event| {
-                sig_event.* = true;
-            }
-
-            // Trigger the softirq for this core to check for a context switch 
-            // once the current interrupt exits.
-
-            SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x01 else 0x02);
-
-            // If we are running on multiple cores, we need to signal the other core too.
-
-            if (RTTS.core_count > 1) {
-                // Set the softirq for the other core
-                SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
-            }
+        pub fn reschedule_all_cores() void {
+            reschedule();
         }
 
         //------------------------------------------------------------------------------
-        /// Send the wait SVC
+        /// Perfom a reschedule_all_cores from an ISR.
+        /// For the RP2xxx this is the same as the normal reschedule_all_cores.
         ///
-        pub fn wait() void {
-            asm volatile (
-                \\ li    a0, 2
-                \\ ecall
-            );
+        pub fn reschedule_all_cores_isr() void {
+            reschedule();
         }
 
         //==============================================================================
@@ -305,21 +279,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                 switch (in_code) {
                     .yield => {
-//                        std.log.debug("MEH: yield", .{});
+                        //                        std.log.debug("MEH: yield", .{});
                         if (RTTS.current_task[0]) |task| {
                             task.state = .yielded;
                             sp = RTTS.find_next_task_sp(sp);
                         }
                     },
                     .significant_event => {
-//                        std.log.debug("MEH: significant_event", .{});
+                        //                        std.log.debug("MEH: significant_event", .{});
                         for (&RTTS.sig_event) |*sig_event| {
                             sig_event.* = true;
                         }
                         sp = RTTS.find_next_task_sp(sp);
                     },
                     .wait => {
-//                        std.log.debug("MEH: wait", .{});
+                        //                        std.log.debug("MEH: wait", .{});
                         if (RTTS.current_task[0]) |task| {
                             // We need to wait if we have a mask and no
                             // mask bit has a corresponding event flag set.
