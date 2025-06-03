@@ -474,7 +474,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 var a_task: ?*TaskItem = highest_priority_task;
                 while (a_task) |task| {
                     if (task.state == .runnable) {
-                        //                        std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
+                        //std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
 
                         task.state = .running;
                         current_task[platform.core_id()] = task;
@@ -734,7 +734,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     first_timer = self;
                     self.next = null;
 
-                    platform.enable_timer_interrupt();
+                    platform.enable_timer();
                 }
             }
 
@@ -752,7 +752,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     first_timer = self.next;
 
                     if (first_timer == null) {
-                        platform.disable_timer_interrupt();
+                        platform.disable_timer();
                     }
 
                     return;
@@ -812,7 +812,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     }
 
                     if (first_timer == null) {
-                        platform.disable_timer_interrupt();
+                        platform.disable_timer();
                     }
 
                     switch (timer.action) {

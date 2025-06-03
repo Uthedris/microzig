@@ -177,7 +177,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             }
 
             if (RTTS.first_timer != null) {
-                enable_timer_interrupt();
+                enable_timer();
             }
 
             // Run the first task on this core
@@ -217,13 +217,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         //------------------------------------------------------------------------------
         /// Enable the timer interrupt
-        pub fn enable_timer_interrupt() void {
+        pub fn enable_timer() void {
             systick.CTRL.modify(.{ .TICKINT = 1 });
         }
 
         //------------------------------------------------------------------------------
         /// Disable the timer interrupt
-        pub fn disable_timer_interrupt() void {
+        pub fn disable_timer() void {
             systick.CTRL.modify(.{ .TICKINT = 0 });
         }
 

@@ -95,7 +95,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             null_task_stack[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = cpu.interrupt.core.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
             // _ = cpu.interrupt.core.set_handler(.MachineSoftware, .{ .naked = machine_software_ISR });
 
             std.log.debug("{s}Entered start_cores  core_mask: 0x{x:02}", .{ debug_core(), RTTS.core_mask });
@@ -108,7 +107,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // Configure the machine timer
 
-            disable_timer_interrupt();
+            disable_timer();
 
             SIO.MTIME_CTRL.modify(.{ .EN = 0 });
 
@@ -166,7 +165,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         //------------------------------------------------------------------------------
         /// Enable the timer interrupt
-        pub fn enable_timer_interrupt() void {
+        pub fn enable_timer() void {
             var new_time: u64 = SIO.MTIMEH.raw;
             new_time <<= 32; 
             new_time += SIO.MTIME.raw;
@@ -181,7 +180,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         //------------------------------------------------------------------------------
         /// Disable the timer interrupt
-        pub fn disable_timer_interrupt() void {
+        pub fn disable_timer() void {
             cpu.interrupt.core.disable(.MachineTimer);
         }
 

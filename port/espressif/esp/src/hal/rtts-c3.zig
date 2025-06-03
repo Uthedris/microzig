@@ -2,10 +2,11 @@
 //! core risc-v processor.
 //!
 //! System resources used:
-//!   - Exception handler (Machine Exception) for `ecall` instruction dispatch.
+//!   - Interrupts 30 and 31
+//!   - systimer alarm2
+//!   - from_cpu_intr0
 //!
 //!
-// ### TODO ###  Test calling "significant_event()" and "signal_event()" from an interrupt handler.
 
 const std = @import("std");
 const microzig = @import("microzig");
@@ -17,6 +18,7 @@ const chip = microzig.chip;
 const irq = hal.irq;
 const multicore = hal.multicore;
 const time = hal.time;
+const systimer = hal.systimer;
 const compatibility = hal.compatibility;
 
 const peripherals = chip.peripherals;
@@ -26,16 +28,17 @@ const SIO = peripherals.SIO;
 
 const csr = cpu.csr;
 
-pub const SvcID = enum(u8) {
-    yield = 0x00,
-    significant_event = 0x01,
-    wait = 0x02,
-    _,
-};
+const Alarm = systimer.Alarm;
+
+const timg0 = peripherals.TIMG0;
+
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
     return struct {
         const Platform = @This();
+
+        pub const timer_interrupt = cpu.Interrupt.interrupt30;
+        pub const reschedule_interrupt = cpu.Interrupt.interrupt31;
 
         pub const cores_available = 0x01;
 
@@ -89,12 +92,48 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             null_task_stack_pointer[31] = @intFromPtr(&null_task_loop);
             null_task_stack_pointer[32] = if (config.run_unprivileged) 0x0000_0081 else 0x0000_1881;
 
-            // ### TODO ### uncomment below when we allow these to be set at runtime
-            // _ = cpu.interrupt.core.set_handler(.Exception, .{ .riscv = machine_exception_ISR });
+            // Configure the reschedule interrupt
 
-            // Configure the tick timer
+            cpu.interrupt.map(.from_cpu_intr0, reschedule_interrupt);
+            cpu.interrupt.set_priority(reschedule_interrupt, .lowest);
 
-            // ### TODO ### configure the tick timer for esp32-c3
+            // Configure the timer
+
+            const initial_timer_value: u26 = @intCast(1_000_000 * systimer.ticks_per_us() / config.resolution);
+
+
+            Alarm.alarm2.set_interrupt_enabled(false);
+            Alarm.alarm2.clear_interrupt();
+
+            Alarm.alarm2.set_enabled(false);
+            Alarm.alarm2.set_unit(.unit0);
+            Alarm.alarm2.set_mode(.period);
+            Alarm.alarm2.set_period(initial_timer_value);
+            Alarm.alarm2.set_enabled(true);
+        
+            const period = microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD;
+
+            std.log.debug("-- Timer period: {d}", .{period});
+
+            var target:u64 = microzig.chip.peripherals.SYSTIMER.TARGET2_HI.raw;
+            target <<= 32;
+            target |= microzig.chip.peripherals.SYSTIMER.TARGET2_LO.raw;
+
+            std.log.debug("-- Timer target: {d}", .{target}); 
+
+        std.log.debug(" -- systimer target2 period: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD});
+        std.log.debug(" -- systimer target2 period mode: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD_MODE});
+        std.log.debug(" -- systimer target2 timer unit sel: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_TIMER_UNIT_SEL});
+
+        std.log.debug(" -- systimer conf  target2 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TARGET2_WORK_EN});
+        std.log.debug(" -- systimer conf  timer unit0 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_WORK_EN});
+        std.log.debug(" -- systimer conf  timer unit0 core0 stall en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_CORE0_STALL_EN});
+
+            cpu.interrupt.map(.systimer_target2, timer_interrupt);
+            cpu.interrupt.set_priority(timer_interrupt, @enumFromInt(2));
+            cpu.interrupt.enable(timer_interrupt);
+
+        std.log.debug("-- systimer unit0 start: {d}", .{hal.systimer.Unit.unit0.read()});
 
             run_first_task();
         }
@@ -103,7 +142,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Perform a reschedule (this core)
         ///
         pub fn reschedule() void {
-            // ### TODO ### Schedule task switch when not in interrupt handler
+            peripherals.SYSTEM.CPU_INTR_FROM_CPU_0.write_raw(1);
         }
 
         //------------------------------------------------------------------------------
@@ -119,6 +158,27 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn reschedule_all_cores_isr() void {
             reschedule();
+        }
+
+        //------------------------------------------------------------------------------
+        /// Enable the timer interrupt
+        pub fn enable_timer() void {
+            // var new_time: u64 = SIO.MTIMEH.raw;
+            // new_time <<= 32; 
+            // new_time += SIO.MTIME.raw;
+
+            // new_time += 1_000_000 / config.resolution;
+            
+            // SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
+            // SIO.MTIMECMP.write_raw(@truncate(new_time));            
+
+            Alarm.alarm2.set_interrupt_enabled(true);
+        }
+
+        //------------------------------------------------------------------------------
+        /// Disable the timer interrupt
+        pub fn disable_timer() void {
+            Alarm.alarm2.set_interrupt_enabled(false);
         }
 
         //==============================================================================
@@ -157,6 +217,14 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 }
             }
 
+            if (RTTS.first_timer != null) {
+                Alarm.alarm2.clear_interrupt();
+                Alarm.alarm2.set_interrupt_enabled(true);
+            }
+
+            cpu.interrupt.enable(reschedule_interrupt);
+            cpu.interrupt.enable_interrupts();
+
             if (config.run_unprivileged) {
                 asm volatile (
                     \\    mv    sp, %[sp]        // Set the process stack pointer
@@ -190,12 +258,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // Interrupt service routines
         //==============================================================================
         // These ISR's  need to be registered.
-        //  1. me_ISR   - (Exception)
+        //  1. machine_software_ISR   - (Software)
+        //  2. machine_timer_ISR      - (Timer)
 
         //------------------------------------------------------------------------------
-        /// Machine_exception interrupt service routine
+        /// Machine_software interrupt service routine
         ///
-        /// This isr fires when machine exception is triggered.
+        /// This isr fires when machine software interrupt is triggered.
         /// We use this to handle ecall instructions.
         ///
         //     // Upon Entry the TrapFrame is:
@@ -238,15 +307,15 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //      |  mtval     |    +136 (34)
         //      +------------+
 
-        fn _machine_exception_ISR(_: *cpu.TrapFrame) callconv(.naked) void {
+        fn _machine_software_ISR(_: *cpu.TrapFrame) callconv(.naked) void {
             asm volatile (
                 \\                   // the frame pointer is already in a0
                 \\    mv    s0, ra   // save our return address
-                \\    call  %[dme]   // call do_machine_exception
-                \\    mv    sp, a0   // use the new stack pointer returned by do_machine_exception
+                \\    call  %[fnt]   // call do_machine_software
+                \\    mv    sp, a0   // use the new stack pointer returned by do_machine_software
                 \\    jr    s0       // return
                 :
-                : [dme] "i" (do_machine_exception),
+                : [fnt] "i" (do_machine_software)
             );
         }
 
@@ -254,66 +323,44 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // to be precise in our register usage, but the ISR is callconv(.c), so we need to cast it
         // to a callconv(.c) InterruptHandler function pointer.
 
-        pub const machine_exception_ISR: cpu.InterruptHandler = @ptrCast(&_machine_exception_ISR);
+        pub const machine_software_ISR: cpu.InterruptHandler = @ptrCast(&_machine_software_ISR);
 
-        /// This function is called from the machine_exception_ISR
+        /// This function is called from the machine_software_ISR
         ///
         /// It does the actual dispatching of the ecall instruction
         ///
-        export fn do_machine_exception(in_frame: *cpu.TrapFrame) callconv(.c) [*]usize {
-            var sp: [*]usize = @ptrCast(in_frame);
+        export fn do_machine_software(in_frame: *cpu.TrapFrame) callconv(.c) [*]usize {
+            // const ptr: [*]usize = @ptrCast(in_frame);
+            // std.log.debug("frame at: 0x{x:08}", .{@intFromPtr(in_frame)});
+            // for (0..35) |i| {
+            //     std.log.debug("In:  {d:2}: 0x{x:08}", .{ i, ptr[i] }); 
+            // }
 
-            //           std.log.debug("MEH: frame: 0x{x:08} sp: 0x{x:08} pc: 0x{x:08}", .{ @intFromPtr(in_frame), @intFromPtr(sp), in_frame.pc });
+            // Clear the softirq for this core
+            peripherals.SYSTEM.CPU_INTR_FROM_CPU_0.write_raw(0);
 
-            if (in_frame.mcause == 0x08 or in_frame.mcause == 0x0b) {
-                // We got here due to an ecall instruction.  The what that works
-                // leaves the PC pointing to the ecall instruction itself.  We
-                // must bump it by four bytes to point to the next instruction.
+            const result = RTTS.find_next_task_sp(@ptrCast(in_frame));
 
-                const in_code: SvcID = @enumFromInt(in_frame.a0);
+            // std.log.debug("next sp at: 0x{x:08}", .{@intFromPtr(result)});
+            // for (0..35) |i| {
+            //     std.log.debug("Out: {d:2}: 0x{x:08}", .{ i, result[i] }); 
+            // }
 
-                in_frame.pc += 4;
+            return result;
+        }
 
-                // Dispatch the instruction. This may change the stack pointer.
-                // if a new task is dispatched.
+        //------------------------------------------------------------------------------
+        /// Machine_timer interrupt service routine
+        ///
+        /// This isr fires when machine timer interrupt is triggered.
+        ///
 
-                switch (in_code) {
-                    .yield => {
-                        //                        std.log.debug("MEH: yield", .{});
-                        if (RTTS.current_task[0]) |task| {
-                            task.state = .yielded;
-                            sp = RTTS.find_next_task_sp(sp);
-                        }
-                    },
-                    .significant_event => {
-                        //                        std.log.debug("MEH: significant_event", .{});
-                        for (&RTTS.sig_event) |*sig_event| {
-                            sig_event.* = true;
-                        }
-                        sp = RTTS.find_next_task_sp(sp);
-                    },
-                    .wait => {
-                        //                        std.log.debug("MEH: wait", .{});
-                        if (RTTS.current_task[0]) |task| {
-                            // We need to wait if we have a mask and no
-                            // mask bit has a corresponding event flag set.
-                            if (task.event_mask != 0 and task.event_mask & task.event_flags == 0) {
-                                task.state = .waiting;
-                                sp = RTTS.find_next_task_sp(sp);
-                            }
-                        }
-                    },
-                    else => {
-                        std.log.err("Unhandled machine exception code: {s}", .{@tagName(in_code)});
-                    },
-                }
-            }
-
-            //            for (0..44) |i| {
-            //                std.log.debug("New: sp[{d:2}] frame[{d:2}]: 0x{x:08}", .{ i, if (i < 4) 0 else i-4, sp[i] });
-            //            }
-
-            return sp;
+        pub fn machine_timer_ISR(in_frame: *cpu.TrapFrame) callconv(.c) void {
+            _ = @TypeOf(in_frame);
+                        
+            Alarm.alarm2.clear_interrupt();
+            
+            RTTS.Timer.tick();
         }
 
         //==============================================================================
