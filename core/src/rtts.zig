@@ -319,6 +319,21 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             }
         }
 
+        //----------------------------------------------------------------------------
+        /// Clear task's own event flags
+        ///
+        /// This function will clear the specified event flag for the task.
+        ///
+        /// Parameters:
+        ///   in_event_mask - The event mask to clear
+        ///
+        /// Do not call this function from an interrupt service routine.
+        ///
+        pub fn clear_event_flags(in_event_mask: EventFlags) void {
+            const the_task = get_current_task();
+            the_task.event_flags &= ~in_event_mask;
+        }
+
         //============================================================================
         // Interrupt Service Routine Scheduler Functions
         //============================================================================
@@ -738,7 +753,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 }
             }
 
-            //------------------------------------------------------------------------------
             // Remove the timer from the pending list
             pub fn cancel(self: *Timer) void {
                 if (self.expire_in == 0) return;
@@ -827,5 +841,132 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 }
             }
         };
+
+        //============================================================================
+        // RTTS Mailbox
+        //============================================================================
+
+        pub fn mailbox_init( T: type, in_allocator: std.mem.Allocator, in_receiver: *TaskTag, in_event_flag: u8) type {
+            return struct {
+                const Mailbox = @This();
+
+                allocator: std.mem.Allocator = in_allocator,
+                receiver: *TaskTag = in_receiver,
+                event_flag: u8 = in_event_flag,
+                messages: ?*Message = null,
+                last_message: ?*Message = null,
+                recieved_message: ?*Message = null,
+                message_mutex: interrupt.Mutex = .{},
+
+                const Message = struct {
+                    next: ?*Message = null,
+                    data: T
+                };
+
+                // ---------------------------------------------------------------------------
+                /// Add a message to the mailbox.  Any task waiting for a message will be
+                /// have the mailbox signaled.
+                /// 
+                /// Do not call this function from an interrupt service routine.
+                ///
+                /// Parameters:
+                ///   in_data - The data to add to the mailbox
+                ///
+                pub fn send(self: *Mailbox, in_data: T) !void {
+                    try self.do_send(in_data);
+                    try signal_event(self.receiver, self.event_flag);
+                }
+
+                // ---------------------------------------------------------------------------
+                /// Add a message to the mailbox.  Any task waiting for a message will be
+                /// have the mailbox signaled.
+                /// 
+                /// This method is safe to be called from an interrupt service routine.
+                ///
+                /// Parameters:
+                ///   in_data - The data to add to the mailbox
+                ///
+                pub fn send_isr(self: *Mailbox, in_data: T) !void {
+                    try self.do_send(in_data);
+                    try signal_event_isr(self.receiver, self.event_flag);
+                }
+
+                // ---------------------------------------------------------------------------
+                /// Internal function to add a message to the mailbox.
+                fn do_send(self: *Mailbox, in_data:T) !void {
+                    const message = try self.allocator.create(Message);
+                    message.* = .{
+                        .next = null,
+                        .data = in_data,
+                    };
+
+                    self.message_mutex.lock();
+                    defer self.message_mutex.unlock();
+
+                    if (self.messages) |last| {
+                        last.next = message;
+                    } else {
+                        self.messages = message;
+                    }
+
+                    self.last_message = message;
+                }
+
+                // ---------------------------------------------------------------------------
+                /// Check if there is a message in the mailbox
+                ///
+                /// Returns:
+                ///   true if there is a message in the mailbox false otherwise
+                pub fn has_message(self: *Mailbox) bool {
+                    return self.messages != null;
+                }
+
+                // ---------------------------------------------------------------------------
+                /// Receive a message from the mailbox.  This method will cause the task
+                /// to wait until a message is available.
+                /// 
+                /// Returns the message data as a slice of u8.  This slice is valid until
+                /// the next message is received.
+                /// 
+                /// Raises:
+                ///   error.InvalidTask - If the `receive` method is called by a task
+                ///     that is not the receiver.
+                /// 
+                pub fn receive(self: *Mailbox) !*const T {
+
+                    if (get_current_task() != self.receiver) {
+                        return error.InvalidTask;
+                    }
+
+                    const mask: EventFlags = @as(EventFlags, 1) << @intCast(self.event_flag);   
+
+                    while (true) {
+                        {
+                            self.message_mutex.lock();
+                            defer self.message_mutex.unlock();
+
+                            if (self.recieved_message) |message| {
+                                self.allocator.destroy(message);
+                            }
+
+                            if (self.messages) |message| {
+                                self.recieved_message = message;
+                                self.messages = message.next;
+
+                                if (self.messages == null) {
+                                    self.last_message = null;
+                                    self.receiver.clear_event(self.event_flag);
+                                    clear_event_flags(mask);
+                                }
+
+                                return message.data;
+                            }
+                        }
+
+                        wait_for_event(mask, false);
+                    }
+                }
+            };
+        }
     };
 }
