@@ -114,7 +114,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             //
             // On the RP2350 the available priority values are 0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, and 0xE0.
             // The lowest priority is 0xE0 and the highest priority is 0x00.
-            
+
             cpu.interrupt.exception.set_priority(.PendSV, .lowest);
 
             // Configure the systick timer
@@ -190,7 +190,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 } else {
                     multicore.doorbell.set(0);
                 }
-    
+
                 microzig.cpu.sev();
             }
 
@@ -209,8 +209,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Switch to the null task.
         pub fn switch_to_null_task() [*]usize {
 
-
-             // Set up null task stack
+            // Set up null task stack
 
             const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[core_id()][null_task_stack_len - 16]);
 

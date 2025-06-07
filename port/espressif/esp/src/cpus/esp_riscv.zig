@@ -692,7 +692,7 @@ fn unhandled(_: *TrapFrame) linksection(".trap") callconv(.c) void {
         std.log.err("unhandled interrupt {} occurred!", .{mcause.code});
     } else {
         const exception: Exception = @enumFromInt(mcause.code);
-        std.log.err("exception {s} occurred!  PC: 0x{X:08}", .{@tagName(exception), csr.mepc.read()});
+        std.log.err("exception {s} occurred!  PC: 0x{X:08}", .{ @tagName(exception), csr.mepc.read() });
     }
 
     @panic("unhandled trap");

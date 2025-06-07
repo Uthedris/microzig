@@ -224,7 +224,7 @@ pub const startup_logic = struct {
 
     fn unhandled_exception() callconv(riscv_calling_convention) void {
         var buf: [32]u8 = undefined;
-        @panic(std.fmt.bufPrint(&buf, "unhandled exception: {d}", .{csr.mcause.read_raw()}) catch unreachable );
+        @panic(std.fmt.bufPrint(&buf, "unhandled exception: {d}", .{csr.mcause.read_raw()}) catch unreachable);
     }
 
     fn unhandled_software_interrupt() callconv(riscv_calling_convention) void {

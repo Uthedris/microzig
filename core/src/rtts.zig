@@ -279,7 +279,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///
         pub fn yield() void {
             // const the_task = get_current_task();
-            
+
             // the_task.state = .runnable;
             // std.log.debug("{s}  Set task {s} to runnable", .{ platform.debug_core(), @tagName(the_task.tag) });
 
@@ -433,7 +433,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     task_a.next = null;
                 }
             }
-            
+
             significant_event();
         }
 
@@ -499,7 +499,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                     current_task[core_id] = task;
                     return task.stack_pointer;
-                }   
+                }
             }
 
             next_task = null;
@@ -554,10 +554,10 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// Normally a timer will wake a task, by setting an event flag. However, it can also
         /// call a function.  The function runs in handler mode and should not block or take
         /// long to execute.
-        /// 
+        ///
         /// Timers delay times are specified in milliseconds, but are converted to ticks
         /// based on the config.resolution parameter.
-        /// 
+        ///
         pub const Timer = struct {
             /// The next timer in priority order
             next: ?*Timer = null,
@@ -772,7 +772,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // Perform actions for expired timers
 
                 while (first_timer) |timer| {
-
                     if (timer.expire_in != 0) break;
 
                     // Remove the timer from the (beginning of) pending list
@@ -782,7 +781,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     // std.log.debug("Timer expired for task 0x{x:08} next {any}", .{ @intFromPtr(timer), timer.next });
 
                     if (timer.respawn) {
-                       // std.log.debug("Timer respawned", .{});
+                        // std.log.debug("Timer respawned", .{});
                         timer._do_schedule();
                     } else {
                         // std.log.debug("Timer not respawned", .{});
@@ -809,29 +808,28 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         // RTTS Mailbox
         //============================================================================
         /// A mailbox is a queue of messages that can be sent to a task.
-        /// 
+        ///
         /// A mailbox is initialized with an allocator, an event flag, and a receiver.
         /// The receiver is the task that will receive messages from the mailbox.
         /// If the receiver is null the current task will be used.
-        /// 
+        ///
         /// Messages are sent to the mailbox with the `send` method.  This does a shallow
-        /// copy of the message data.  The mailbox will signal the receiver when a message 
+        /// copy of the message data.  The mailbox will signal the receiver when a message
         /// is available.
-        /// 
+        ///
         /// Messages are received from the mailbox with the `receive` method.  The
         /// receiver will block until a message is available.
-        /// 
+        ///
         /// Messages are freed when the next message is received or when the `free_message`
         /// method is called.
-        /// 
+        ///
         /// If the type `T` is a container with a function named `callback`, that function
         /// will be called with a pointer to the internal copy of the message data before
         /// the message is freed.  This allows the message sender to perform any additional
-        /// cleanup.   
-        /// 
+        /// cleanup.
+        ///
         /// Parameters:
         ///   T - The type of the data passed in the message.
-
         pub fn mailbox(T: type) type {
             return struct {
                 const Mailbox = @This();
@@ -844,10 +842,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 recieved_message: ?*Message = null,
                 message_mutex: interrupt.Mutex = .{},
 
-                const Message = struct {
-                    next: ?*Message = null,
-                    data: T
-                };
+                const Message = struct { next: ?*Message = null, data: T };
 
                 const Callback = fn (*const T) void;
 
@@ -875,7 +870,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // ---------------------------------------------------------------------------
                 /// Add a message to the mailbox.  Any task waiting for a message will be
                 /// have the mailbox signaled.
-                /// 
+                ///
                 /// Do not call this function from an interrupt service routine.
                 ///
                 /// Parameters:
@@ -889,7 +884,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // ---------------------------------------------------------------------------
                 /// Add a message to the mailbox.  Any task waiting for a message will be
                 /// have the mailbox signaled.
-                /// 
+                ///
                 /// This method is safe to be called from an interrupt service routine.
                 ///
                 /// Parameters:
@@ -902,7 +897,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 // ---------------------------------------------------------------------------
                 /// Internal function to add a message to the mailbox.
-                fn do_send(self: *Mailbox, in_data:T) !void {
+                fn do_send(self: *Mailbox, in_data: T) !void {
                     const message = try self.allocator.create(Message);
                     message.* = .{
                         .next = null,
@@ -933,23 +928,22 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 // ---------------------------------------------------------------------------
                 /// Receive a message from the mailbox.  If no message is available the task
                 /// calling this method will wait until a message is available.
-                /// 
+                ///
                 /// Returns a pointer to the data in the message.
-                /// 
+                ///
                 /// This method with free the previously received message when it is called,
                 /// so the returned pointer is only valid until the next call to `receive`.
-                /// 
+                ///
                 /// Raises:
                 ///   error.InvalidTask - If the `receive` method is called by a task
                 ///     that is not the receiver.
-                /// 
+                ///
                 pub fn receive(self: *Mailbox) !*T {
-
                     if (get_current_task().tag != self.receiver) {
                         return error.InvalidTask;
                     }
 
-                    const mask: EventFlags = @as(EventFlags, 1) << @intCast(self.event_flag);   
+                    const mask: EventFlags = @as(EventFlags, 1) << @intCast(self.event_flag);
 
                     while (true) {
                         {
@@ -990,7 +984,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                         self.recieved_message = null;
                     }
                 }
-
             };
         }
     };

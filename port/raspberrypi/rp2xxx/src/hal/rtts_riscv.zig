@@ -93,16 +93,16 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             SIO.MTIME.write_raw(0);
             SIO.MTIMEH.write_raw(0);
-                
+
             const initial_timer_value = 1_000_000 / config.resolution;
 
             // Note: If the timer expires too soon, it will cause a machine exception.
             //       If debug logging is added to run_first_task, the initial timer
             //       value should be set to a larger value to allow time for the
             //       first task to run before the timer expires.
-            
+
             SIO.MTIMECMPH.write_raw(0);
-            SIO.MTIMECMP.write_raw(initial_timer_value);            
+            SIO.MTIMECMP.write_raw(initial_timer_value);
 
             SIO.MTIME_CTRL.modify(.{ .EN = 1 });
 
@@ -112,7 +112,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             run_first_task();
         }
-
 
         //------------------------------------------------------------------------------
         /// Perform a reschedule (this core)
@@ -148,7 +147,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //----------------------------------------------------------------------------
         /// Switch to the null task.
         pub fn switch_to_null_task() [*]usize {
-
             const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[core_id()][null_task_stack_len - 32]);
 
             null_task_stack_pointer[0] = @intFromPtr(&null_task_loop);
@@ -161,13 +159,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Enable the timer interrupt
         pub fn enable_timer() void {
             var new_time: u64 = SIO.MTIMEH.raw;
-            new_time <<= 32; 
+            new_time <<= 32;
             new_time += SIO.MTIME.raw;
 
             new_time += 1_000_000 / config.resolution;
-            
+
             SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
-            SIO.MTIMECMP.write_raw(@truncate(new_time));            
+            SIO.MTIMECMP.write_raw(@truncate(new_time));
 
             cpu.interrupt.core.enable(.MachineTimer);
         }
@@ -377,16 +375,15 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// machine timer interrupt service routine
         ///
         pub fn machine_timer_ISR() callconv(riscv_calling_convention) void {
-
             var new_time: u64 = SIO.MTIMECMPH.raw;
-            new_time <<= 32; 
+            new_time <<= 32;
             new_time += SIO.MTIMECMP.raw;
 
             new_time += 1_000_000 / config.resolution;
-            
+
             SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
-            SIO.MTIMECMP.write_raw(@truncate(new_time));            
- 
+            SIO.MTIMECMP.write_raw(@truncate(new_time));
+
             RTTS.Timer.tick();
         }
 

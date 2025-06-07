@@ -32,7 +32,6 @@ const Alarm = systimer.Alarm;
 
 const timg0 = peripherals.TIMG0;
 
-
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
     return struct {
         const Platform = @This();
@@ -93,7 +92,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             const initial_timer_value: u26 = @intCast(1_000_000 * systimer.ticks_per_us() / config.resolution);
 
-
             Alarm.alarm2.set_interrupt_enabled(false);
             Alarm.alarm2.clear_interrupt();
 
@@ -102,30 +100,30 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             Alarm.alarm2.set_mode(.period);
             Alarm.alarm2.set_period(initial_timer_value);
             Alarm.alarm2.set_enabled(true);
-        
+
             const period = microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD;
 
             std.log.debug("-- Timer period: {d}", .{period});
 
-            var target:u64 = microzig.chip.peripherals.SYSTIMER.TARGET2_HI.raw;
+            var target: u64 = microzig.chip.peripherals.SYSTIMER.TARGET2_HI.raw;
             target <<= 32;
             target |= microzig.chip.peripherals.SYSTIMER.TARGET2_LO.raw;
 
-            std.log.debug("-- Timer target: {d}", .{target}); 
+            std.log.debug("-- Timer target: {d}", .{target});
 
-        std.log.debug(" -- systimer target2 period: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD});
-        std.log.debug(" -- systimer target2 period mode: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD_MODE});
-        std.log.debug(" -- systimer target2 timer unit sel: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_TIMER_UNIT_SEL});
+            std.log.debug(" -- systimer target2 period: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD});
+            std.log.debug(" -- systimer target2 period mode: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_PERIOD_MODE});
+            std.log.debug(" -- systimer target2 timer unit sel: {d}", .{microzig.chip.peripherals.SYSTIMER.TARGET2_CONF.read().TARGET2_TIMER_UNIT_SEL});
 
-        std.log.debug(" -- systimer conf  target2 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TARGET2_WORK_EN});
-        std.log.debug(" -- systimer conf  timer unit0 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_WORK_EN});
-        std.log.debug(" -- systimer conf  timer unit0 core0 stall en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_CORE0_STALL_EN});
+            std.log.debug(" -- systimer conf  target2 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TARGET2_WORK_EN});
+            std.log.debug(" -- systimer conf  timer unit0 work en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_WORK_EN});
+            std.log.debug(" -- systimer conf  timer unit0 core0 stall en: {d}", .{microzig.chip.peripherals.SYSTIMER.CONF.read().TIMER_UNIT0_CORE0_STALL_EN});
 
             cpu.interrupt.map(.systimer_target2, timer_interrupt);
             cpu.interrupt.set_priority(timer_interrupt, @enumFromInt(2));
             cpu.interrupt.enable(timer_interrupt);
 
-        std.log.debug("-- systimer unit0 start: {d}", .{hal.systimer.Unit.unit0.read()});
+            std.log.debug("-- systimer unit0 start: {d}", .{hal.systimer.Unit.unit0.read()});
 
             run_first_task();
         }
@@ -155,7 +153,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //----------------------------------------------------------------------------
         /// Switch to the null task.
         pub fn switch_to_null_task() [*]usize {
-
             const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[null_task_stack_len - 35]);
 
             null_task_stack_pointer[30] = @intFromPtr(&null_task_stack) + 4 * null_task_stack_len;
@@ -169,13 +166,13 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Enable the timer interrupt
         pub fn enable_timer() void {
             // var new_time: u64 = SIO.MTIMEH.raw;
-            // new_time <<= 32; 
+            // new_time <<= 32;
             // new_time += SIO.MTIME.raw;
 
             // new_time += 1_000_000 / config.resolution;
-            
+
             // SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
-            // SIO.MTIMECMP.write_raw(@truncate(new_time));            
+            // SIO.MTIMECMP.write_raw(@truncate(new_time));
 
             Alarm.alarm2.set_interrupt_enabled(true);
         }
@@ -321,7 +318,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 \\    mv    sp, a0   // use the new stack pointer returned by do_machine_software
                 \\    jr    s0       // return
                 :
-                : [fnt] "i" (do_machine_software)
+                : [fnt] "i" (do_machine_software),
             );
         }
 
@@ -339,7 +336,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             // const ptr: [*]usize = @ptrCast(in_frame);
             // std.log.debug("frame at: 0x{x:08}", .{@intFromPtr(in_frame)});
             // for (0..35) |i| {
-            //     std.log.debug("In:  {d:2}: 0x{x:08}", .{ i, ptr[i] }); 
+            //     std.log.debug("In:  {d:2}: 0x{x:08}", .{ i, ptr[i] });
             // }
 
             // Clear the softirq for this core
@@ -349,7 +346,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
             // std.log.debug("next sp at: 0x{x:08}", .{@intFromPtr(result)});
             // for (0..35) |i| {
-            //     std.log.debug("Out: {d:2}: 0x{x:08}", .{ i, result[i] }); 
+            //     std.log.debug("Out: {d:2}: 0x{x:08}", .{ i, result[i] });
             // }
 
             return result;
@@ -360,12 +357,11 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         /// This isr fires when machine timer interrupt is triggered.
         ///
-
         pub fn machine_timer_ISR(in_frame: *cpu.TrapFrame) callconv(.c) void {
             _ = @TypeOf(in_frame);
-                        
+
             Alarm.alarm2.clear_interrupt();
-            
+
             RTTS.Timer.tick();
         }
 
