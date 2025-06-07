@@ -71,7 +71,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         pub const TaskState = enum {
             running,
             runnable,
-            yielded,
             waiting,
         };
 
@@ -106,8 +105,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// The current task on each core
         pub var current_task: [core_count]?*TaskItem = @splat(null);
 
-        /// Test true if the core needs to scan the task list from the top.
-        pub var sig_event: [core_count]bool = @splat(false);
+        /// Last scheduled task
+        pub var next_task: ?*TaskItem = null;
 
         /// The mutex used to synchronize access to the task list.
         pub var schedule_mutex: interrupt.Mutex = .{};
@@ -259,6 +258,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 if ((the_task.event_flags & the_task.event_mask) == 0) {
                     the_task.state = .waiting;
+                    // std.log.debug("{s}  Set task {s} to waiting", .{ platform.debug_core(), @tagName(the_task.tag) });
                     reschedule = true;
                 }
             }
@@ -278,9 +278,10 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// Do not call this function from an interrupt service routine.
         ///
         pub fn yield() void {
-    
-            const the_task = get_current_task();
-            the_task.state = .yielded;
+            // const the_task = get_current_task();
+            
+            // the_task.state = .runnable;
+            // std.log.debug("{s}  Set task {s} to runnable", .{ platform.debug_core(), @tagName(the_task.tag) });
 
             platform.reschedule();
         }
@@ -295,7 +296,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// Do not call this function from an interrupt service routine.
         ///
         pub fn significant_event() void {
-            clear_yield_flags();
+            next_task = highest_priority_task;
             platform.reschedule_all_cores();
         }
 
@@ -314,8 +315,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///
         pub fn signal_event(in_task: TaskTag, in_event: u8) !void {
             if (try _signal_task(in_task, in_event)) {
-                clear_yield_flags();
-                platform.reschedule_all_cores();
+                significant_event();
             }
         }
 
@@ -346,7 +346,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         /// change the tasks assigned to any core.
         ///
         pub fn significant_event_isr() void {
-            clear_yield_flags();
+            next_task = highest_priority_task;
             platform.reschedule_all_cores_isr();
         }
 
@@ -365,8 +365,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///
         pub fn signal_event_isr(in_task: TaskTag, in_event: u8) !void {
             if (try _signal_task(in_task, in_event)) {
-                clear_yield_flags();
-                platform.reschedule_all_cores_isr();
+                significant_event_isr();
             }
         }
 
@@ -379,7 +378,6 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///               will be placed at the bottom of the priority list.
         ///
         pub fn set_priority(in_task_a: TaskTag, in_task_b: ?TaskTag) void {
-            defer significant_event();
 
             // Sanity check -- we do nothing if task_a and task_b are the same
 
@@ -387,52 +385,56 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 if (t == in_task_a) return;
             }
 
-            schedule_mutex.lock();
-            defer schedule_mutex.unlock();
+            {
+                schedule_mutex.lock();
+                defer schedule_mutex.unlock();
 
-            const task_a = &task_list[@intFromEnum(in_task_a)];
+                const task_a = &task_list[@intFromEnum(in_task_a)];
 
-            // Unlink task_a from priority list
+                // Unlink task_a from priority list
 
-            if (highest_priority_task == task_a) {
-                highest_priority_task = task_a.next.?;
-            } else {
-                for (&task_list) |*an_item| {
-                    if (an_item.next) |next| {
-                        if (next == task_a) {
-                            an_item.next = task_a.next;
-                            break;
+                if (highest_priority_task == task_a) {
+                    highest_priority_task = task_a.next.?;
+                } else {
+                    for (&task_list) |*an_item| {
+                        if (an_item.next) |next| {
+                            if (next == task_a) {
+                                an_item.next = task_a.next;
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            if (in_task_b) |t| {
-                // Link task_a into priority list before task_b
-                const task_b = &task_list[@intFromEnum(t)];
+                if (in_task_b) |t| {
+                    // Link task_a into priority list before task_b
+                    const task_b = &task_list[@intFromEnum(t)];
 
-                for (&task_list) |*an_item| {
-                    if (an_item.next) |next| {
-                        if (next == task_b) {
+                    for (&task_list) |*an_item| {
+                        if (an_item.next) |next| {
+                            if (next == task_b) {
+                                an_item.next = task_a;
+                                task_a.next = task_b;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Link task_a into priority list at end
+
+                    for (&task_list) |*an_item| {
+                        if (an_item.next == null) {
                             an_item.next = task_a;
-                            task_a.next = task_b;
+                            task_a.next = null;
                             break;
                         }
                     }
-                }
-            } else {
-                // Link task_a into priority list at end
 
-                for (&task_list) |*an_item| {
-                    if (an_item.next == null) {
-                        an_item.next = task_a;
-                        task_a.next = null;
-                        break;
-                    }
+                    task_a.next = null;
                 }
-
-                task_a.next = null;
             }
+            
+            significant_event();
         }
 
         //============================================================================
@@ -470,83 +472,43 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             schedule_mutex.lock();
             defer schedule_mutex.unlock();
 
+            const core_id = platform.core_id();
+
             // Save the stack pointer for the current task and, if it was running,
             // set it to runnable.
 
-            if (current_task[platform.core_id()]) |task| {
+            if (current_task[core_id]) |task| {
                 task.stack_pointer = in_sp;
-                if (task.state == .running) task.state = .runnable;
-            }
 
-            var has_significant_event = sig_event[platform.core_id()];
-            sig_event[platform.core_id()] = false;
+                if (task.state == .running) {
+                    task.state = .runnable;
+                    // std.log.debug("{s}  Set current task {s} to runnable", .{ platform.debug_core(), @tagName(task.tag) });
+                }
+            }
 
             // Scan the task list for the highest priority runnable task
 
-            while (true) {
-                if (has_significant_event) clear_yield_flags();
+            while (next_task) |task| {
+                next_task = task.next;
 
-                var a_task: ?*TaskItem = highest_priority_task;
-                while (a_task) |task| {
-                    if (task.state == .runnable) {
-                        //std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
+                if (task.state == .runnable) {
+                    // std.log.debug("{s}  Switch to task {s} sp: 0x{X:08}", .{ platform.debug_core(), @tagName(task.tag), @intFromPtr(task.stack_pointer) });
 
-                        task.state = .running;
-                        current_task[platform.core_id()] = task;
-                        return task.stack_pointer;
-                    }
+                    task.state = .running;
+                    // std.log.debug("{s}  Set task {s} to running", .{ platform.debug_core(), @tagName(task.tag) });
 
-                    a_task = task.next;
-                }
-
-                // If we get here we didn't find a runnable task, one of two things happened:
-                // 1. We had a significant event - since nothing wants to run we run the null task.
-                // 2. We didn't have a significant event - scan again as if we did to check for yielded tasks.
-
-                if (has_significant_event) break;
-
-                has_significant_event = true;
+                    current_task[core_id] = task;
+                    return task.stack_pointer;
+                }   
             }
 
-            std.log.debug("{s}  Switch to null task  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(platform.null_task_stack_pointer) });
+            next_task = null;
+            current_task[core_id] = null;
+            const null_task_sp = platform.switch_to_null_task();
 
-            current_task[platform.core_id()] = null;
-            return platform.null_task_stack_pointer;
-        }
+            // std.log.debug("{s}  Switch to null task  sp: 0x{X:08}", .{ platform.debug_core(), @intFromPtr(null_task_sp) });
 
-        //----------------------------------------------------------------------------
-        /// Clear any yield flags making the yielded tasks runnable.
-        ///
-        pub fn clear_yield_flags() void {
-            for (&task_list) |*an_item| {
-                if (an_item.state == .yielded) {
-                    an_item.state = .runnable;
-                }
-            }
-        }
-
-        //----------------------------------------------------------------------------
-        /// Find the lowest priority task that is assigned to a core
-        /// Note: This function should be called from within a critical section.
-        pub fn find_lowest_priority_running() ?*TaskItem {
-            var retval: *TaskItem = &task_list[0];
-
-            for (0..core_count) |i| {
-                if (core_mask & (@as(u8, 1) << @intCast(i)) == 0) continue;
-
-                if (current_task[i]) |a_task| {
-                    std.log.debug("{s}  core {d} has task {s}", .{ platform.debug_core(), i, @tagName(a_task.tag) });
-                    if (priority_compare(a_task, retval) < 0) {
-                        retval = a_task;
-                    }
-                } else {
-                    // Found null task -- it's always the lowest priority
-                    std.log.debug("{s}  core {d} has null task", .{ platform.debug_core(), i });
-                    return null;
-                }
-            }
-
-            return retval;
+            return null_task_sp;
         }
 
         //----------------------------------------------------------------------------
@@ -559,7 +521,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             var need_significant_event = false;
             const the_task = &task_list[@intFromEnum(in_task)];
 
-            std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
+            //std.log.debug("{s}  Signaling event {d} to task {s} ({s})", .{ platform.debug_core(), in_event, @tagName(in_task), @tagName(the_task.state) });
 
             {
                 schedule_mutex.lock();
@@ -571,6 +533,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 if ((the_task.event_mask & setFlag) != 0 and the_task.state == .waiting) {
                     the_task.state = .runnable;
+                    // std.log.debug("{s}  Set task {s} to runnable", .{ platform.debug_core(), @tagName(the_task.tag) });
                     need_significant_event = true;
                 }
             }
@@ -816,13 +779,13 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                     first_timer = timer.next;
 
-                    std.log.debug("Timer expired for task 0x{x:08} next {any}", .{ @intFromPtr(timer), timer.next });
+                    // std.log.debug("Timer expired for task 0x{x:08} next {any}", .{ @intFromPtr(timer), timer.next });
 
                     if (timer.respawn) {
-                        std.log.debug("Timer respawned", .{});
+                       // std.log.debug("Timer respawned", .{});
                         timer._do_schedule();
                     } else {
-                        std.log.debug("Timer not respawned", .{});
+                        // std.log.debug("Timer not respawned", .{});
                     }
 
                     if (first_timer == null) {
@@ -834,7 +797,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                             timer.action.function.func(timer.action.function.param);
                         },
                         .event_flag => {
-                            std.log.debug("Sending task {s} event flag {d}", .{ @tagName(timer.action.event_flag.task_tag), timer.action.event_flag.event_flag });
+                            //std.log.debug("Sending task {s} event flag {d}", .{ @tagName(timer.action.event_flag.task_tag), timer.action.event_flag.event_flag });
                             signal_event_isr(timer.action.event_flag.task_tag, timer.action.event_flag.event_flag) catch unreachable;
                         },
                     }
@@ -845,14 +808,37 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         //============================================================================
         // RTTS Mailbox
         //============================================================================
+        /// A mailbox is a queue of messages that can be sent to a task.
+        /// 
+        /// A mailbox is initialized with an allocator, an event flag, and a receiver.
+        /// The receiver is the task that will receive messages from the mailbox.
+        /// If the receiver is null the current task will be used.
+        /// 
+        /// Messages are sent to the mailbox with the `send` method.  This does a shallow
+        /// copy of the message data.  The mailbox will signal the receiver when a message 
+        /// is available.
+        /// 
+        /// Messages are received from the mailbox with the `receive` method.  The
+        /// receiver will block until a message is available.
+        /// 
+        /// Messages are freed when the next message is received or when the `free_message`
+        /// method is called.
+        /// 
+        /// If the type `T` is a container with a function named `callback`, that function
+        /// will be called with a pointer to the internal copy of the message data before
+        /// the message is freed.  This allows the message sender to perform any additional
+        /// cleanup.   
+        /// 
+        /// Parameters:
+        ///   T - The type of the data passed in the message.
 
-        pub fn mailbox_init( T: type, in_allocator: std.mem.Allocator, in_receiver: *TaskTag, in_event_flag: u8) type {
+        pub fn mailbox(T: type) type {
             return struct {
                 const Mailbox = @This();
 
-                allocator: std.mem.Allocator = in_allocator,
-                receiver: *TaskTag = in_receiver,
-                event_flag: u8 = in_event_flag,
+                allocator: std.mem.Allocator,
+                receiver: *TaskTag,
+                event_flag: u8,
                 messages: ?*Message = null,
                 last_message: ?*Message = null,
                 recieved_message: ?*Message = null,
@@ -862,6 +848,29 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     next: ?*Message = null,
                     data: T
                 };
+
+                const Callback = fn (*const T) void;
+
+                // ---------------------------------------------------------------------------
+                /// Initialize an instance of the mailbox.
+                ///
+                /// Parameters:
+                ///   allocator - The allocator to use for memory allocation
+                ///   event_flag - The event flag to use for signaling
+                ///   receiver - The task that will receive messages from the mailbox
+                ///     If null the current task will be used
+                ///
+                pub fn init(allocator: std.mem.Allocator, event_flag: u8, receiver: ?*TaskTag) Mailbox {
+                    return Mailbox{
+                        .allocator = allocator,
+                        .receiver = if (receiver) |r| r else get_current_task().tag,
+                        .event_flag = event_flag,
+                        .messages = null,
+                        .last_message = null,
+                        .recieved_message = null,
+                        .message_mutex = interrupt.Mutex{},
+                    };
+                }
 
                 // ---------------------------------------------------------------------------
                 /// Add a message to the mailbox.  Any task waiting for a message will be
@@ -922,19 +931,21 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 }
 
                 // ---------------------------------------------------------------------------
-                /// Receive a message from the mailbox.  This method will cause the task
-                /// to wait until a message is available.
+                /// Receive a message from the mailbox.  If no message is available the task
+                /// calling this method will wait until a message is available.
                 /// 
-                /// Returns the message data as a slice of u8.  This slice is valid until
-                /// the next message is received.
+                /// Returns a pointer to the data in the message.
+                /// 
+                /// This method with free the previously received message when it is called,
+                /// so the returned pointer is only valid until the next call to `receive`.
                 /// 
                 /// Raises:
                 ///   error.InvalidTask - If the `receive` method is called by a task
                 ///     that is not the receiver.
                 /// 
-                pub fn receive(self: *Mailbox) !*const T {
+                pub fn receive(self: *Mailbox) !*T {
 
-                    if (get_current_task() != self.receiver) {
+                    if (get_current_task().tag != self.receiver) {
                         return error.InvalidTask;
                     }
 
@@ -947,6 +958,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                             if (self.recieved_message) |message| {
                                 self.allocator.destroy(message);
+                                self.recieved_message = null;
                             }
 
                             if (self.messages) |message| {
@@ -959,13 +971,26 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                                     clear_event_flags(mask);
                                 }
 
-                                return message.data;
+                                return &message.data;
                             }
                         }
 
                         wait_for_event(mask, false);
                     }
                 }
+
+                // ---------------------------------------------------------------------------
+                /// Free the last fetched message
+                pub fn free_message(self: *Mailbox) void {
+                    self.message_mutex.lock();
+                    defer self.message_mutex.unlock();
+
+                    if (self.recieved_message) |message| {
+                        self.allocator.destroy(message);
+                        self.recieved_message = null;
+                    }
+                }
+
             };
         }
     };

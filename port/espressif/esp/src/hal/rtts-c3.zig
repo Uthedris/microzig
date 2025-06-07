@@ -84,14 +84,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn start_cores() noreturn {
 
-            // Set up null task stack
-
-            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 35]);
-
-            null_task_stack_pointer[30] = @intFromPtr(&null_task_stack) + 4 * null_task_stack_len;
-            null_task_stack_pointer[31] = @intFromPtr(&null_task_loop);
-            null_task_stack_pointer[32] = if (config.run_unprivileged) 0x0000_0081 else 0x0000_1881;
-
             // Configure the reschedule interrupt
 
             cpu.interrupt.map(.from_cpu_intr0, reschedule_interrupt);
@@ -149,7 +141,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Perform a reschedule (all cores)
         ///
         pub fn reschedule_all_cores() void {
-            reschedule();
+            peripherals.SYSTEM.CPU_INTR_FROM_CPU_0.write_raw(1);
         }
 
         //------------------------------------------------------------------------------
@@ -157,7 +149,20 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// For the RP2xxx this is the same as the normal reschedule_all_cores.
         ///
         pub fn reschedule_all_cores_isr() void {
-            reschedule();
+            reschedule_all_cores();
+        }
+
+        //----------------------------------------------------------------------------
+        /// Switch to the null task.
+        pub fn switch_to_null_task() [*]usize {
+
+            const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[null_task_stack_len - 35]);
+
+            null_task_stack_pointer[30] = @intFromPtr(&null_task_stack) + 4 * null_task_stack_len;
+            null_task_stack_pointer[31] = @intFromPtr(&null_task_loop);
+            null_task_stack_pointer[32] = if (config.run_unprivileged) 0x0000_0081 else 0x0000_1881;
+
+            return null_task_stack_pointer;
         }
 
         //------------------------------------------------------------------------------
@@ -210,6 +215,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         target_pc = a_task.stack_pointer[31];
                         target_sp = a_task.stack_pointer + 35;
+                        RTTS.next_task = a_task.next;
 
                         std.log.debug("Starting task {s} pc: 0x{x:08} sp: 0x{x:08}", .{ @tagName(a_task.tag), target_pc, @intFromPtr(target_sp) });
                         break;
@@ -367,10 +373,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // Null Task
         //==============================================================================
 
-        const null_task_stack_len = 48;
+        const null_task_stack_len = 256;
 
         var null_task_stack: [null_task_stack_len]usize = undefined;
-        pub var null_task_stack_pointer: [*]usize = undefined;
 
         // ------------------------------------------------------------------------
         // The null task just calls wait for interrupt in an infinite loop.

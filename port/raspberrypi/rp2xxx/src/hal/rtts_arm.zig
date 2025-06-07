@@ -32,15 +32,8 @@ const SIO = peripherals.SIO;
 const scb = cpu.peripherals.scb;
 const systick = cpu.peripherals.systick;
 
-const SvcID = enum(u8) {
-    yield = 0x00,
-    significant_event = 0x01,
-    wait = 0x02,
-};
-
 const FIFOCommand = enum(u8) {
     dispatch,
-    block,
     _,
 };
 
@@ -110,24 +103,19 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn start_cores() noreturn {
 
-            // Set up null task stack
-
-            null_task_stack[null_task_stack_len - 2] = @intFromPtr(&null_task_loop);
-            null_task_stack[null_task_stack_len - 1] = 0x01000000;
-
-            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 16]);
-
             // Set the priority of the PendSV exception to the lowest possible value (which
             // is numerically the highest value)
 
-            if (compatibility.chip == .RP2040) {
-                PPB.SHPR3.modify(.{ .PRI_14 = 3 });
-            } else {
-                PPB.SHPR3.modify(.{ .PRI_14_3 = 7 });
-            }
-
             _ = cpu.interrupt.exception.set_handler(.PendSV, .{ .naked = pendsv_ISR });
             _ = cpu.interrupt.exception.set_handler(.SysTick, .{ .c = sysTick_ISR });
+
+            // On the RP2040 the available priority values are 0x00, 0x40, 0x80, and 0xC0.
+            // The lowest priority is 0xC0 and the highest priority is 0x00.
+            //
+            // On the RP2350 the available priority values are 0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, and 0xE0.
+            // The lowest priority is 0xE0 and the highest priority is 0x00.
+            
+            cpu.interrupt.exception.set_priority(.PendSV, .lowest);
 
             // Configure the systick timer
 
@@ -202,6 +190,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 } else {
                     multicore.doorbell.set(0);
                 }
+    
+                microzig.cpu.sev();
             }
 
             scb.ICSR.modify(.{ .PENDSVSET = 1 });
@@ -213,6 +203,21 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn reschedule_all_cores_isr() void {
             reschedule_all_cores();
+        }
+
+        //----------------------------------------------------------------------------
+        /// Switch to the null task.
+        pub fn switch_to_null_task() [*]usize {
+
+
+             // Set up null task stack
+
+            const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[core_id()][null_task_stack_len - 16]);
+
+            null_task_stack_pointer[14] = @intFromPtr(&null_task_loop);
+            null_task_stack_pointer[15] = 0x0100_0000;
+
+            return null_task_stack_pointer;
         }
 
         //------------------------------------------------------------------------------
@@ -259,7 +264,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             // Find the highest priority task.  If launched on multiple
             // cores, each will pick a different task.
 
-            var target_sp: [*]usize = &null_task_stack;
+            var target_sp: [*]usize = switch_to_null_task();
             var target_pc: usize = @intFromPtr(&null_task_loop);
 
             {
@@ -276,6 +281,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         target_pc = a_task.stack_pointer[14];
                         target_sp = a_task.stack_pointer + 16;
+                        RTTS.next_task = a_task.next;
 
                         std.log.debug("{s}   Starting task {s}", .{ debug_core(), @tagName(a_task.tag) });
                         break;
@@ -401,15 +407,12 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             var theParam: u32 = 0;
             var theTask: ?*RTTS.TaskItem = null;
 
-            std.log.debug("{s}FIFO ISR   FIFO_ST: 0x{x:08}", .{ debug_core(), SIO.FIFO_ST.raw });
-
             SIO.FIFO_ST.raw = 0;
 
             while (multicore.fifo.read()) |first_word| {
                 // The high order eight bits of the first word of
                 // a transfer are always 0x80.
                 if ((first_word & 0xFF000000) != 0x80000000) {
-                    std.log.debug("{s}   bad command 0x{x:08}", .{ debug_core(), first_word });
                     continue;
                 }
 
@@ -418,7 +421,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                 //This will always be either 1, 2, or 3.
                 if (count < 1 or count > 3) {
-                    std.log.debug("{s}   bad command 0x{x:08}  count: {d}", .{ debug_core(), first_word, count });
                     continue;
                 }
 
@@ -432,25 +434,16 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                 const command: FIFOCommand = @enumFromInt(first_word & 0xFF);
 
-                if (theTask) |task| {
-                    std.log.debug("{s}   dispatch: {} {s} {d}", .{ debug_core(), @intFromEnum(command), @tagName(task.tag), theParam });
-                } else {
-                    std.log.debug("{s}   dispatch: {} null {d}", .{ debug_core(), @intFromEnum(command), theParam });
-                }
-
                 switch (command) {
                     .dispatch => {
                         scb.ICSR.modify(.{ .PENDSVSET = 1 });
                         asm volatile ("isb");
                     },
-                    .block => {},
                     else => {
-                        std.log.debug("Unknown command: 0x{x:08}", .{@intFromEnum(command)});
+                        std.log.err("Unknown command: 0x{x:08}", .{@intFromEnum(command)});
                     },
                 }
             }
-
-            std.log.debug("{s}   done", .{debug_core()});
         }
 
         //------------------------------------------------------------------------------
@@ -517,8 +510,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
         const null_task_stack_len = 24;
 
-        var null_task_stack: [null_task_stack_len]usize = undefined;
-        pub var null_task_stack_pointer: [*]usize = undefined;
+        var null_task_stack: [RTTS.core_count][null_task_stack_len]usize = undefined;
 
         // ------------------------------------------------------------------------
         // The null task just calls wait for interrupt in an infinite loop.

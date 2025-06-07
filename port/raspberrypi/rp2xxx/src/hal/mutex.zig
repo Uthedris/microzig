@@ -69,8 +69,6 @@ pub const Mutex = struct {
             if (self.core != null and self.core.? == microzig.hal.get_cpu_id()) {
                 @panic("mutex already locked by this core");
             }
-
-            microzig.cpu.wfe();
         }
     }
 
@@ -87,8 +85,6 @@ pub const Mutex = struct {
             } else {
                 self.spinlock.unlock_irq(cs);
             }
-
-            microzig.cpu.sev();
         }
     }
 };

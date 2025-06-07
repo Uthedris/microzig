@@ -26,19 +26,6 @@ const SIO = peripherals.SIO;
 
 const csr = cpu.csr;
 
-pub const SvcID = enum(u8) {
-    yield = 0x00,
-    significant_event = 0x01,
-    wait = 0x02,
-    _,
-};
-
-const FIFOCommand = enum(u8) {
-    dispatch,
-    block,
-    _,
-};
-
 const riscv_calling_convention: std.builtin.CallingConvention = .{ .riscv32_interrupt = .{ .mode = .machine } };
 
 pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type {
@@ -86,13 +73,6 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         /// Initialize the cores
         ///
         pub fn start_cores() noreturn {
-
-            // Set up null task stack
-
-            null_task_stack_pointer = @ptrCast(&null_task_stack[null_task_stack_len - 32]);
-
-            null_task_stack[0] = @intFromPtr(&null_task_loop);
-            null_task_stack[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
 
             // ### TODO ### uncomment below when we allow these to be set at runtime
             // _ = cpu.interrupt.core.set_handler(.MachineSoftware, .{ .naked = machine_software_ISR });
@@ -149,6 +129,8 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             if (RTTS.core_count > 1) {
                 // Trigger the softirq for the other core
                 SIO.RISCV_SOFTIRQ.write_raw(if (core_id() == 0) 0x02 else 0x01);
+
+                microzig.cpu.sev();
             }
 
             // Trigger the softirq for this core
@@ -161,6 +143,18 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         ///
         pub fn reschedule_all_cores_isr() void {
             reschedule_all_cores();
+        }
+
+        //----------------------------------------------------------------------------
+        /// Switch to the null task.
+        pub fn switch_to_null_task() [*]usize {
+
+            const null_task_stack_pointer: [*]usize = @ptrCast(&null_task_stack[core_id()][null_task_stack_len - 32]);
+
+            null_task_stack_pointer[0] = @intFromPtr(&null_task_loop);
+            null_task_stack_pointer[1] = if (config.run_unprivileged) 0x0000_0080 else 0x0000_1880;
+
+            return null_task_stack_pointer;
         }
 
         //------------------------------------------------------------------------------
@@ -199,7 +193,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             // Find the highest priority task.  If launched on multiple
             // cores, each will pick a different task.
 
-            var target_sp: [*]usize = &null_task_stack;
+            var target_sp: [*]usize = switch_to_null_task();
             var target_pc: usize = @intFromPtr(&null_task_loop);
 
             {
@@ -216,6 +210,7 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
 
                         target_pc = a_task.stack_pointer[0];
                         target_sp = a_task.stack_pointer + 32;
+                        RTTS.next_task = a_task.next;
                         break;
                     }
                 }
@@ -399,10 +394,9 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         // Null Task
         //==============================================================================
 
-        const null_task_stack_len = 48;
+        const null_task_stack_len = 128;
 
-        var null_task_stack: [null_task_stack_len]usize = undefined;
-        pub var null_task_stack_pointer: [*]usize = undefined;
+        var null_task_stack: [RTTS.core_count][null_task_stack_len]usize = undefined;
 
         // ------------------------------------------------------------------------
         // The null task just calls wait for interrupt in an infinite loop.

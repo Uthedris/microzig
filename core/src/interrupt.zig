@@ -68,6 +68,16 @@ pub const Handler = extern union {
 pub const unhandled: Handler = .{
     .c = struct {
         pub fn unhandled() callconv(.c) void {
+            if (microzig.hal.compatibility.arch == .arm) {
+                var xpsr: u32 = undefined;
+                asm volatile ("mrs %[xpsr], xpsr" : [xpsr] "=r" (xpsr));
+                std.log.debug("*** Unhandled interrupt: {x:08}", .{ xpsr});
+
+                if (xpsr & 0xFF == 3) {
+                   const fault = @as(*const u32, @ptrFromInt(0xE000ED28)).*;
+                   std.log.debug("*** Fault: {x:08}", .{ fault });
+                }
+            }
             @panic("unhandled interrupt");
         }
     }.unhandled,
