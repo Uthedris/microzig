@@ -190,13 +190,13 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
                 last_task = &task_list[i];
 
-                std.log.debug("Initialized task \"{s}\":", .{task.name});
-                std.log.debug("  func: {any}", .{task.func});
-                std.log.debug("  stack_size: {d}", .{task.stack_size});
-                std.log.debug("  stack: {any}", .{task_list[i].stack_pointer});
-                std.log.debug("  event_flags: {x}", .{task_list[i].event_flags});
-                std.log.debug("  event_mask: {x}", .{task_list[i].event_mask});
-                std.log.debug("  state: {s}", .{@tagName(task_list[i].state)});
+                // std.log.debug("Initialized task \"{s}\":", .{task.name});
+                // std.log.debug("  func: {any}", .{task.func});
+                // std.log.debug("  stack_size: {d}", .{task.stack_size});
+                // std.log.debug("  stack: {any}", .{task_list[i].stack_pointer});
+                // std.log.debug("  event_flags: {x}", .{task_list[i].event_flags});
+                // std.log.debug("  event_mask: {x}", .{task_list[i].event_mask});
+                // std.log.debug("  state: {s}", .{@tagName(task_list[i].state)});
 
                 // for (0..16) |j| {
                 //     std.log.debug("  sp + {d:2}: 0x{X:08}", .{ j, task_list[i].stack_pointer[j] });

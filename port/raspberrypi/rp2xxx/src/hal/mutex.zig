@@ -27,6 +27,9 @@ pub const Mutex = struct {
     // Set to true to enable interrupts when the mutex is locked.
     enable_interrupts: bool = false,
 
+    // Set by
+    set_by: u32 = 0xDeadBeef,
+
     /// Initialize the mutex.
     /// Parameters:
     /// - `params`: Mutex configuration parameters.
@@ -50,6 +53,7 @@ pub const Mutex = struct {
 
         // Good to go. Record the core id and critical section but release the spinlock.
         self.core = @intCast(microzig.hal.get_cpu_id());
+        self.set_by = @returnAddress();
         self.critical_section = cs;
 
         if (self.enable_interrupts) {
@@ -67,15 +71,18 @@ pub const Mutex = struct {
     pub fn lock(self: *Mutex) void {
         while (!self.try_lock()) {
             if (self.core != null and self.core.? == microzig.hal.get_cpu_id()) {
-                @panic("mutex already locked by this core");
+                var buf: [50]u8 = undefined;
+                @panic(std.fmt.bufPrint(&buf, "mutex already locked by core {} from 0x{x:08}", .{self.core.?, self.set_by}) catch unreachable);
             }
         }
+        self.set_by = @returnAddress();
     }
 
     /// Unlock the mutex by leaving the critical section
     pub fn unlock(self: *Mutex) void {
         self.spinlock.lock();
         self.core = null;
+        self.set_by = 0;
 
         if (self.critical_section) |cs| {
             self.critical_section = null;
