@@ -102,14 +102,14 @@ pub fn main() !void {
 fn taskA() noreturn {
     while (true) {
         std.log.debug("{s}TaskA -- Top of loop -- waiting for event", .{scheduler.platform.debug_core()});
-        scheduler.wait_for_event(0x01, true);
+        scheduler.wait_for_event(.event_flag_1, true);
     }
 }
 
 fn taskB() noreturn {
     while (true) {
         std.log.debug("{s}TaskB -- Signaling task alpha", .{scheduler.platform.debug_core()});
-        scheduler.signal_event(.alpha, 0) catch unreachable;
+        scheduler.signal_event(.alpha, .event_flag_1);
 
         std.log.debug("{s}TaskB -- Yielding", .{scheduler.platform.debug_core()});
         scheduler.yield();

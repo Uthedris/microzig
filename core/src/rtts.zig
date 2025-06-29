@@ -16,9 +16,6 @@ pub const Config = struct {
     /// A bit mask of cores to use.  If 0xFF, all available cores are used.
     use_cores: u8 = 0xFF,
 
-    /// The number of event flags to use.
-    event_flags_count: u8 = 8,
-
     /// run tasks in unprivileged mode
     run_unprivileged: bool = false,
 
@@ -27,6 +24,9 @@ pub const Config = struct {
 
     /// Platform specific code override.
     platform: ?type = null,
+
+    /// Event flags count
+    event_flags_count: u8 = 8,
 };
 
 /// A structure containing the task configuration data.
@@ -45,13 +45,28 @@ pub const Task = struct {
 /// containing functions to control in_tasks.
 ///
 /// Parameters:
-///   config - The configuration for the RTTS Scheduler
 ///   tasks - An array of tasks to run
+///   config - The configuration for the RTTS Scheduler
 ///
 /// Returns:
 ///   The scheduler namespace
 ///
-pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
+pub fn scheduler(comptime tasks: []const Task, comptime config: Config) type {
+
+    var event_flags_fields: [config.event_flags_count]std.builtin.Type.EnumField = undefined;
+
+    comptime for (&event_flags_fields, 0..) |*field, i| {
+        var buf: [16]u8 = undefined;
+        field.name = std.fmt.bufPrintZ(&buf, "event_flag_{d}", .{i}) catch unreachable;
+        field.value = @intCast(1 << i);
+    };
+
+    const EventFlagType = @Type( .{ .@"enum" = .{ 
+        .tag_type = std.meta.Int(.unsigned, config.event_flags_count), 
+        .decls = &.{}, 
+        .fields = &event_flags_fields, 
+        .is_exhaustive = true } });
+    
     return struct {
         const Sched = @This();
 
@@ -75,6 +90,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         };
 
         const EventFlags = std.meta.Int(.unsigned, config.event_flags_count);
+        const EventFlag = EventFlagType;
 
         /// A task item
         pub const TaskItem = struct {
@@ -222,7 +238,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         }
 
         //----------------------------------------------------------------------------
-        /// Wait for an event.
+        /// Wait for one of a set of events.
         ///
         /// This function will set the current task's event mask to the value
         /// specified in in_event_mask.  If in_clear_flags is true, it will also
@@ -244,7 +260,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///   in_event_mask - The event mask to wait for
         ///   in_clear_flags - If true, clear event flags that match the event mask
         ///
-        pub fn wait_for_event(in_event_mask: EventFlags, in_clear_flags: bool) void {
+        pub fn wait_for_event_in_mask(in_event_mask: EventFlags, in_clear_flags: bool) void {
             const the_task = get_current_task();
 
             the_task.event_mask = in_event_mask;
@@ -266,6 +282,31 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             if (reschedule) {
                 platform.reschedule();
             }
+        }
+
+        //----------------------------------------------------------------------------
+        /// Wait for a specific event.
+        ///
+        /// This function will set the current task's event mask to the value
+        /// specified in in_event.  If in_clear_flag is true, it will also
+        /// clear the matching event flag.
+        ///
+        /// Finally, if a bit-wise and of the task's event flags and event mask
+        /// is zero, the task will be set to the waiting state.
+        ///
+        /// To reactivate the task, some other task or interrupt service routine
+        /// must set at lease one of this task's event flags that match a bit in
+        /// this task's event mask.
+        ///
+        /// Note: The event flags are numbered 0 to N-1, where N is the value of
+        ///       config.event_flags_count.
+        ///
+        /// Parameters:
+        ///   in_event - The event to wait for
+        ///   in_clear_flag - If true, clear event flag
+        ///
+        pub fn wait_for_event(in_event: EventFlag, in_clear_flag: bool) void {
+            wait_for_event_in_mask(@intFromEnum(in_event), in_clear_flag);
         }
 
         //----------------------------------------------------------------------------
@@ -313,8 +354,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///
         /// Do not call this function from an interrupt service routine.
         ///
-        pub fn signal_event(in_task: TaskTag, in_event: u8) !void {
-            if (try _signal_task(in_task, in_event)) {
+        pub fn signal_event(in_task: TaskTag, in_event: EventFlag) void {
+            if (_signal_task(in_task, in_event)) {
                 significant_event();
             }
         }
@@ -363,8 +404,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
         ///
         /// Do not call this function from an interrupt service routine.
         ///
-        pub fn signal_event_isr(in_task: TaskTag, in_event: u8) !void {
-            if (try _signal_task(in_task, in_event)) {
+        pub fn signal_event_isr(in_task: TaskTag, in_event: EventFlag) void {
+            if (_signal_task(in_task, in_event)) {
                 significant_event_isr();
             }
         }
@@ -513,10 +554,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
 
         //----------------------------------------------------------------------------
 
-        fn _signal_task(in_task: TaskTag, in_event: u8) !bool {
-            if (in_event >= config.event_flags_count) {
-                return error.InvalidEventFlag;
-            }
+        fn _signal_task(in_task: TaskTag, in_event: EventFlag) bool {
 
             var need_significant_event = false;
             const the_task = &task_list[@intFromEnum(in_task)];
@@ -527,7 +565,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 schedule_mutex.lock();
                 defer schedule_mutex.unlock();
 
-                const setFlag = @as(EventFlags, 1) << @intCast(in_event);
+                const setFlag = @intFromEnum(in_event);
 
                 the_task.event_flags |= setFlag;
 
@@ -571,7 +609,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             action: union(TimerMode) {
                 event_flag: struct {
                     task_tag: TaskTag,
-                    event_flag: u8,
+                    event_flag: EventFlag,
                 },
                 function: struct {
                     func: *const fn (param: ?*anyopaque) void,
@@ -607,11 +645,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             ///   in_respawn - If true, the timer will be respawned when it expires
             ///   in_task_tag - The task tag to signal
             ///   in_event_flag - The event flag number to signal
-            pub fn init_with_event_flag(in_delay: u32, in_respawn: bool, in_task_tag: TaskTag, in_event_flag: u8) !Timer {
-                if (in_event_flag >= config.event_flags_count) {
-                    return error.InvalidEventFlag;
-                }
-
+            pub fn init_with_event_flag(in_delay: u32, in_respawn: bool, in_task_tag: TaskTag, in_event_flag: EventFlag) Timer {
                 return .{
                     .delay = delay_to_ticks(in_delay),
                     .respawn = in_respawn,
@@ -670,6 +704,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                 timer_mutex.lock();
                 defer timer_mutex.unlock();
 
+                // std.log.debug( "Scheduling timer {x:08} with delay {d}", .{ @intFromPtr(self), self.delay } );
+
                 self._do_schedule();
             }
 
@@ -684,27 +720,44 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     // front of the list, adjusting the delay of the original
                     // first timer to account for the delay of "self".
 
+                    // std.log.debug( "we have a first timer {x:08} with expiry {d}", .{ @intFromPtr(first), first.expire_in } );
+
                     if (first.expire_in >= self.expire_in) {
                         first.expire_in -= self.expire_in;
                         self.next = first;
                         first_timer = self;
+
+                        // std.log.debug( "Added timer {x:08} with expiry {d} to front of list", .{ @intFromPtr(self), self.delay } );
                     } else {
 
                         // Scan the list looking for the correct position for "self"
 
                         var an_item = first_timer;
                         while (an_item.?.next) |next| {
-                            self.expire_in -= an_item.?.expire_in;
+
+                            // std.log.debug( "we have a next timer {x:08} with expiry {d}", .{ @intFromPtr(next), next.expire_in } );
+
 
                             if (next.expire_in <= self.expire_in) {
                                 next.expire_in -= self.expire_in;
                                 self.next = next;
                                 an_item.?.next = self;
+
+                                // std.log.debug( "Added timer {x:08} with expiry {d} to list", .{ @intFromPtr(self), self.expire_in } );
                                 break;
                             }
 
+                            self.expire_in -= an_item.?.expire_in;
                             an_item = next;
                         }
+
+                        // Add to end of list
+
+                        self.expire_in -= an_item.?.expire_in;
+                        an_item.?.next = self;
+                        self.next = null;
+
+                        // std.log.debug( "Added timer {x:08} with expiry {d} to end of list", .{ @intFromPtr(self), self.expire_in } );
                     }
                 } else {
                     // No timers on the list, so we are the first
@@ -712,11 +765,14 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                     first_timer = self;
                     self.next = null;
 
+                    // std.log.debug( "Added timer {x:08} with expiry {d} as only timer", .{ @intFromPtr(self), self.expire_in } );
+
                     platform.enable_timer();
                 }
             }
 
-            // Remove the timer from the pending list
+            //------------------------------------------------------------------------------
+            /// Remove the timer from the pending list
             pub fn cancel(self: *Timer) void {
                 if (self.expire_in == 0) return;
 
@@ -746,6 +802,16 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             }
 
             //------------------------------------------------------------------------------
+            /// Sleep for a specified number of ticks
+            /// This uses event flag zero.
+            pub fn sleep(in_ticks: u32) void {
+                const timer = Timer.init_with_event_flag(TaskTag.main, 0);
+                timer.schedule(in_ticks);
+                wait_for_event(0, true);
+            }
+
+            //------------------------------------------------------------------------------
+            /// Convert a delay in milliseconds to ticks
             pub fn delay_to_ticks(in_delay: u32) u32 {
                 var delay: u64 = in_delay;
                 delay *= config.resolution;
@@ -753,6 +819,7 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
             }
 
             //------------------------------------------------------------------------------
+            /// Convert ticks to a delay in milliseconds
             pub fn ticks_to_delay(in_ticks: u32) u32 {
                 var delay: u64 = in_ticks;
                 delay *= 1000;
@@ -796,8 +863,8 @@ pub fn scheduler(comptime config: Config, comptime tasks: []const Task) type {
                             timer.action.function.func(timer.action.function.param);
                         },
                         .event_flag => {
-                            //std.log.debug("Sending task {s} event flag {d}", .{ @tagName(timer.action.event_flag.task_tag), timer.action.event_flag.event_flag });
-                            signal_event_isr(timer.action.event_flag.task_tag, timer.action.event_flag.event_flag) catch unreachable;
+                            // std.log.debug("Sending task {s} event flag {d}", .{ @tagName(timer.action.event_flag.task_tag), timer.action.event_flag.event_flag });
+                            signal_event_isr(timer.action.event_flag.task_tag, timer.action.event_flag.event_flag);
                         },
                     }
                 }

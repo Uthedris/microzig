@@ -158,22 +158,27 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //------------------------------------------------------------------------------
         /// Enable the timer interrupt
         pub fn enable_timer() void {
-            var new_time: u64 = SIO.MTIMEH.raw;
-            new_time <<= 32;
-            new_time += SIO.MTIME.raw;
+            // ### TODO ### implement this so it always happens on core 0
+            //              remove enable in run_first_task
 
-            new_time += 1_000_000 / config.resolution;
+            // var new_time: u64 = SIO.MTIMEH.raw;
+            // new_time <<= 32;
+            // new_time += SIO.MTIME.raw;
 
-            SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
-            SIO.MTIMECMP.write_raw(@truncate(new_time));
+            // new_time += 1_000_000 / config.resolution;
 
-            cpu.interrupt.core.enable(.MachineTimer);
+            // SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
+            // SIO.MTIMECMP.write_raw(@truncate(new_time));
+
+            // cpu.interrupt.core.enable(.MachineTimer);
         }
 
         //------------------------------------------------------------------------------
         /// Disable the timer interrupt
         pub fn disable_timer() void {
-            cpu.interrupt.core.disable(.MachineTimer);
+            // ### TODO ### implement this so it always happens on core 0
+
+            //cpu.interrupt.core.disable(.MachineTimer);
         }
 
         //==============================================================================
@@ -217,6 +222,18 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
             if (core_id() == 0) {
                 irq.globally_enable();
                 cpu.interrupt.core.enable(.MachineSoftware);
+                
+                // ### TODO ### remove when enable_timer is implemented
+                var new_time: u64 = SIO.MTIMEH.raw;
+                new_time <<= 32;
+                new_time += SIO.MTIME.raw;
+
+                new_time += 1_000_000 / config.resolution;
+
+                SIO.MTIMECMPH.write_raw(@intCast(new_time >> 32));
+                SIO.MTIMECMP.write_raw(@truncate(new_time));
+
+                cpu.interrupt.core.enable(.MachineTimer);
             }
 
             if (config.run_unprivileged) {

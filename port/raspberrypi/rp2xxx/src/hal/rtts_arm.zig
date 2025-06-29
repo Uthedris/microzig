@@ -222,13 +222,20 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
         //------------------------------------------------------------------------------
         /// Enable the timer interrupt
         pub fn enable_timer() void {
-            systick.CTRL.modify(.{ .TICKINT = 1 });
+            // ### TODO ### implement this so it always happens on core 0
+            //              remove enable in run_first_task
+
+            // std.log.debug("{s}Enabled timer interrupt", .{debug_core()});
+            // systick.CTRL.modify(.{ .TICKINT = 1 });
         }
 
         //------------------------------------------------------------------------------
         /// Disable the timer interrupt
         pub fn disable_timer() void {
-            systick.CTRL.modify(.{ .TICKINT = 0 });
+            // ### TODO ### implement this so it always happens on core 0
+
+            // std.log.debug("{s}Disabled timer interrupt", .{debug_core()});
+            // systick.CTRL.modify(.{ .TICKINT = 0 });
         }
 
         //==============================================================================
@@ -255,6 +262,11 @@ pub fn configure(comptime RTTS: type, comptime config: RTTS.Configuration) type 
                 } else {
                     _ = multicore.doorbell.read_and_clear();
                     irq.enable(.SIO_IRQ_BELL);
+                }
+
+                // ### TODO ### remove when enable_timer is implemented
+                if (core_id() == 0) {
+                    systick.CTRL.modify(.{ .TICKINT = 1 });
                 }
 
                 irq.globally_enable();
