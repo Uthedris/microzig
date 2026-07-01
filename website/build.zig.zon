@@ -13,8 +13,8 @@
     },
     .dependencies = .{
         .zine = .{
-            .url = "git+https://github.com/kristoff-it/zine#2a001538f25198cd5945aa7da72459a7fc1e53ba",
-            .hash = "zine-0.11.3-ou6nIBmEFgBJ5JdclWDJ8X1zcZ_ro5EqTnJFyPakukFJ",
+            .url = "git+https://github.com/kristoff-it/zine#ed64ce7c05bab290482340bb2c13d1240cd7eee0",
+            .hash = "zine-0.11.3-ou6nICaEFgBPZQ9KS4oUDEVkXROLM-dgBw-pRZeiFFX6",
         },
     },
 }
