@@ -22,6 +22,7 @@ pub const systimer = @import("hal/systimer.zig");
 pub const time = @import("hal/time.zig");
 pub const uart = @import("hal/uart.zig");
 pub const usb_serial_jtag = @import("hal/usb_serial_jtag.zig");
+pub const rtts = @import("hal/rtts-c3.zig");
 
 comptime {
     if (!builtin.is_test) {
